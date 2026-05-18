@@ -1,6 +1,8 @@
+import hashlib
 import json
 import re
 import shutil
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +15,96 @@ from pii import strip_pii
 from chunker import chunk
 from writer import write_rag_chunks, write_finetune_record
 from provenance import ProvenanceManifest
+from reporter import generate_reports
 
 
-SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg'}
+SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg', '.txt'}
+
+# Priority when multiple versions of the same document exist.
+# Lower number = higher priority (will be processed; others skipped).
+_EXT_PRIORITY = {'.txt': 0, '.pdf': 1, '.docx': 2, '.pptx': 3, '.eml': 4, '.msg': 5}
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(65536), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+_OCR_SUFFIXES = ('.ocr', '-ocr', '_ocr', '-ocr.pdf', ' searchable copy')
+
+
+def _normalize_stem(path: Path) -> str:
+    """Strip OCR suffixes to get the canonical document name for grouping."""
+    stem = path.stem
+    for suffix in _OCR_SUFFIXES:
+        if stem.lower().endswith(suffix):
+            stem = stem[:len(stem) - len(suffix)]
+    return stem.lower().strip()
+
+
+def _is_ocr_version(path: Path) -> bool:
+    """True if this file is an OCR-processed version of a scanned original."""
+    stem_lower = path.stem.lower()
+    return any(stem_lower.endswith(s) for s in _OCR_SUFFIXES)
+
+
+def _select_best_versions(files: list, skip_log: list) -> list:
+    """
+    Given all candidate files, return one best version per unique document.
+
+    Rules (applied in order):
+    1. Exact SHA-256 duplicates → keep one (smallest path alphabetically), skip rest.
+    2. Same document, multiple formats → prefer by _EXT_PRIORITY
+       (.txt beats .ocr.pdf beats .pdf, etc.)
+    """
+    # Step 1: deduplicate by SHA-256
+    seen_hashes = {}
+    deduped = []
+    for f in sorted(files):
+        try:
+            h = _sha256(f)
+        except OSError:
+            deduped.append(f)
+            continue
+        if h in seen_hashes:
+            skip_log.append({
+                'path': str(f),
+                'reason': 'exact_duplicate',
+                'duplicate_of': str(seen_hashes[h]),
+            })
+        else:
+            seen_hashes[h] = f
+            deduped.append(f)
+
+    # Step 2: prefer best format per normalized stem
+    groups = defaultdict(list)
+    for f in deduped:
+        groups[_normalize_stem(f)].append(f)
+
+    selected = []
+    for stem, group in groups.items():
+        if len(group) == 1:
+            selected.append(group[0])
+            continue
+        # Sort by extension priority, then path length (prefer shorter paths = root over subdir)
+        best = sorted(group, key=lambda f: (
+            _EXT_PRIORITY.get(f.suffix.lower(), 99),
+            0 if _is_ocr_version(f) else 1,  # OCR PDF beats non-OCR PDF
+            len(str(f)),
+        ))[0]
+        selected.append(best)
+        for other in group:
+            if other != best:
+                skip_log.append({
+                    'path': str(other),
+                    'reason': 'superseded_by_better_version',
+                    'superseded_by': str(best),
+                })
+
+    return selected
 
 
 @dataclass
@@ -124,16 +213,27 @@ def process_directory(
     workers: int = 1,
     sidecar_path: Optional[Path] = None,
 ) -> None:
-    files = [
+    all_files = [
         p for p in input_dir.rglob('*')
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
-    if not files:
+    if not all_files:
         print(f"No supported files in {input_dir}")
         return
 
-    print(f"Found {len(files)} file(s).{' DRY RUN.' if dry_run else ''}")
-    manifest = ProvenanceManifest(output_dir, sidecar_path) if not dry_run else None
+    skip_log: list = []
+    files = _select_best_versions(all_files, skip_log)
+
+    print(f"Found {len(all_files)} supported file(s) → {len(files)} to process "
+          f"({len(all_files) - len(files)} skipped as duplicates/superseded)."
+          f"{' DRY RUN.' if dry_run else ''}")
+    for entry in skip_log:
+        reason = entry['reason']
+        detail = entry.get('duplicate_of') or entry.get('superseded_by', '')
+        print(f"  SKIP [{reason}] {Path(entry['path']).name}"
+              f"{f' → use {Path(detail).name}' if detail else ''}")
+    manifest = ProvenanceManifest(output_dir, sidecar_path,
+                                  source_dir=input_dir) if not dry_run else None
     results = []
 
     if workers > 1:
@@ -165,6 +265,10 @@ def process_directory(
                 skip_reason=r.skip_reason,
             )
         manifest.save()
+        generate_reports(output_dir)
+        print(f"\nReports written to {output_dir}/")
+        print(f"  summary.html        — open in browser, print to PDF")
+        print(f"  review/review_log.csv — PII flags for spreadsheet review")
 
 
 def _print_result(r: ProcessResult, dry_run: bool) -> None:

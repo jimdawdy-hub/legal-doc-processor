@@ -34,7 +34,7 @@ class ReadResult:
     ocr_confidence: Optional[float] = None
 
 
-SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg'}
+SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg', '.txt'}
 
 
 def read_file(path: Path) -> Optional['ReadResult']:
@@ -47,7 +47,9 @@ def read_file(path: Path) -> Optional['ReadResult']:
         raise ValueError(f"Unsupported format: {ext}")
     size = path.stat().st_size
 
-    if ext == '.pdf':
+    if ext == '.txt':
+        return _read_txt(path, size)
+    elif ext == '.pdf':
         return _read_pdf(path, size)
     elif ext == '.docx':
         return _read_docx(path, size)
@@ -57,6 +59,14 @@ def read_file(path: Path) -> Optional['ReadResult']:
         return _read_eml(path, size)
     elif ext == '.msg':
         return _read_msg(path, size)
+
+
+def _read_txt(path: Path, size: int) -> ReadResult:
+    text = path.read_text(encoding='utf-8', errors='replace')
+    return ReadResult(
+        text=text, filename=path.name,
+        extension='.txt', size_bytes=size, ocr=False,
+    )
 
 
 def _read_docx(path: Path, size: int) -> ReadResult:

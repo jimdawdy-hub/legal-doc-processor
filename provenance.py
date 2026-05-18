@@ -18,11 +18,13 @@ def _sha256(path: Path) -> str:
 
 
 class ProvenanceManifest:
-    def __init__(self, output_dir: Path, sidecar_path: Optional[Path] = None):
+    def __init__(self, output_dir: Path, sidecar_path: Optional[Path] = None,
+                 source_dir: Optional[Path] = None):
         self.output_dir = output_dir
         self.manifest_path = output_dir / 'provenance.json'
         self.sidecar = self._load_sidecar(sidecar_path) if sidecar_path else {}
         self._files: list = []
+        self._source_dir = str(source_dir.resolve()) if source_dir else None
         self._dataset_meta = self._load_or_init_dataset_meta()
 
     def _load_sidecar(self, path: Path) -> dict:
@@ -71,6 +73,7 @@ class ProvenanceManifest:
         sidecar_info = self.sidecar.get(original_path.name, {})
         self._files.append({
             'original_filename': original_path.name,
+            'source_path': str(original_path.resolve()),
             'sha256': _sha256(original_path),
             'doc_type': doc_type,
             'classification_confidence': round(classification_confidence, 3),
@@ -110,4 +113,6 @@ class ProvenanceManifest:
             'pii_review_flags': sum(f['processing']['review_flags'] for f in processed),
         }
         manifest = {**self._dataset_meta, 'files': self._files, 'summary': summary}
+        if self._source_dir:
+            manifest['source_dir'] = self._source_dir
         self.manifest_path.write_text(json.dumps(manifest, indent=2))
