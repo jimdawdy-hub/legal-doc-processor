@@ -7,6 +7,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.0] — 2026-05-17
+
+### Added
+
+- **`reporter.py`** — Auto-generates two artifacts after every pipeline run: `summary.html` (interactive browser report with per-file results, PII flag tables, and decision toggles) and `review/review_log.csv` (all PII flags as a spreadsheet). No manual step required.
+
+- **`review_server.py`** — Local HTTP server (`python3.12 review_server.py --output /path`) that serves `summary.html` and accepts decisions via POST. Enables fully in-browser review: click through flags, enter reviewer name, click "Apply Decisions" — server patches the dataset and writes the audit trail without any manual CSV handling.
+
+- **`apply_decisions.py`** — Applies a `decisions.csv` to the finetune dataset. Re-runs PII stripping on affected files with restored entities excluded. Writes a `human_reviews` audit entry to `provenance.json` and archives the decisions CSV to the source case folder (`source_dir/audit/`).
+
+- **`review_pii.py`** — Standalone CLI for reviewing PII flags: summary stats, per-file/per-type filtering, CSV export.
+
+### Changed
+
+- **`reader.py`** — Added `.txt` format support. Pre-extracted text files are now processed directly without re-OCR.
+
+- **`pipeline.py`** — Added deduplication logic: exact SHA-256 duplicates are skipped (one processed); when `.txt`, `.ocr.pdf`, and original `.pdf` all exist for the same document, the best version is selected automatically (`.txt` > `.ocr.pdf` > `.pdf`). `source_dir` stored in provenance for audit trail routing.
+
+- **`pii.py`** — DATE_TIME entities now use consistent per-document date shifting (180–730 day offset, seeded by document content hash) instead of random Faker dates. Temporal relationships between dates are preserved. Format-preserving: `March 15, 2024` → `May 26, 2025`, `3/15/2024` → `5/26/2025`. Chunked Presidio analysis handles documents > 900K characters (previously crashed on large medical records). Added explicit `PatternRecognizer` for US_SSN to ensure reliable detection.
+
+- **`provenance.py`** — Added `source_path` per file and `source_dir` at dataset level. `human_reviews` array records each review pass with timestamp, reviewer name, decision counts, and path to archived decisions CSV.
+
+---
+
 ## [0.1.0] — 2026-05-17
 
 Initial release.
