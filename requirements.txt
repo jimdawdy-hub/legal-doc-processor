@@ -21,5 +21,8 @@ Faker>=26.0.0
 langchain-text-splitters>=0.3.0
 tiktoken>=0.7.0
 
+# Claude API (re-identification risk assessment)
+anthropic>=0.68.0
+
 # Testing
 pytest>=8.0.0

@@ -7,6 +7,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] — 2026-05-17
+
+### Added
+
+- **`re_id_risk.py`** — Adversarial re-identification risk assessment. Samples the highest-PII-flag records from the finetune dataset and sends them to `claude-opus-4-7` with an adversarial privacy-expert framing. Identifies quasi-identifiers, reconstruction paths, and specific additional redactions. Writes `output/re_id_risk_report.json` and appends a risk section to `summary.html`. Run as `python3.12 re_id_risk.py --output /path/to/output [--samples 20]`. Requires `ANTHROPIC_API_KEY`.
+
+### Changed
+
+- **`requirements.txt`** — Added `anthropic>=0.68.0` for the Claude API SDK.
+- **`SKILL.md`** — Documented `re_id_risk.py` in the post-run checklist and added interactive review commands.
+
+---
+
 ## [0.2.0] — 2026-05-17
 
 ### Added

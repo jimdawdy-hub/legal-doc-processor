@@ -90,6 +90,24 @@ surprising assignments before processing.
    the finetune dataset if needed.
 3. Check `output/review/ocr_queue/` for any PDFs that couldn't be OCR'd
    reliably (mean word confidence < 70%). These need manual handling.
+4. Run re-identification risk assessment (optional, uses Claude API):
+   ```bash
+   python3.12 re_id_risk.py --output /path/to/output [--samples 20]
+   ```
+   This sends the highest-PII-flag records to `claude-opus-4-7` for
+   adversarial re-identification analysis. Results are saved to
+   `output/re_id_risk_report.json` and appended to `summary.html`.
+   Requires `ANTHROPIC_API_KEY` in the environment.
+
+## Interactive Review
+
+```bash
+# Start browser-based review server (replaces manual CSV handling)
+python3.12 review_server.py --output /path/to/output
+
+# OR: apply a decisions CSV directly from the command line
+python3.12 apply_decisions.py --decisions decisions.csv --output /path/to/output --reviewer "Your Name"
+```
 
 ## PII Confidence Thresholds
 
