@@ -90,13 +90,21 @@ surprising assignments before processing.
    the finetune dataset if needed.
 3. Check `output/review/ocr_queue/` for any PDFs that couldn't be OCR'd
    reliably (mean word confidence < 70%). These need manual handling.
-4. Run re-identification risk assessment (optional, uses Claude API):
+4. Run re-identification risk assessment + second-pass redaction (optional, uses Claude API):
    ```bash
-   python3.12 re_id_risk.py --output /path/to/output [--samples 20]
+   # Assess all records and immediately apply second-pass redaction
+   ANTHROPIC_API_KEY=sk-ant-... python3.12 re_id_risk.py --output /path/to/output --apply
+
+   # Assess only (no redaction); retry any parse failures separately
+   ANTHROPIC_API_KEY=sk-ant-... python3.12 re_id_risk.py --output /path/to/output
+   ANTHROPIC_API_KEY=sk-ant-... python3.12 re_id_risk.py --output /path/to/output --retry-errors
+
+   # Apply second-pass redaction independently (reads existing re_id_risk_report.json)
+   python3.12 second_pass.py --output /path/to/output [--dry-run] [--blocklist terms.txt]
    ```
-   This sends the highest-PII-flag records to `claude-opus-4-7` for
-   adversarial re-identification analysis. Results are saved to
-   `output/re_id_risk_report.json` and appended to `summary.html`.
+   Assesses every finetune record by default (pass `--samples N` to limit).
+   Results saved to `output/re_id_risk_report.json`; risk table appended to `summary.html`.
+   `--apply` automatically runs `second_pass.py` after assessment and patches all JSONL files.
    Requires `ANTHROPIC_API_KEY` in the environment.
 
 ## Interactive Review

@@ -92,7 +92,7 @@ def _assess_record(client: anthropic.Anthropic, record: dict) -> dict:
 
     with client.messages.stream(
         model='claude-opus-4-7',
-        max_tokens=2048,
+        max_tokens=8192,
         thinking={"type": "adaptive"},
         system=[{
             "type": "text",
@@ -148,7 +148,7 @@ def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False)
 
     # Prioritise highest PII-flag records first
     records.sort(key=lambda r: r.get('metadata', {}).get('review_flags', 0), reverse=True)
-    samples = records[:max_samples]
+    samples = records if not max_samples else records[:max_samples]
 
     if not quiet:
         print(f"\nRe-identification Risk Assessment")
@@ -309,19 +309,103 @@ def _hesc(s: str) -> str:
 
 # ---------------------------------------------------------------------------
 
+def retry_errors(output_dir: Path, quiet: bool = False) -> None:
+    """Re-run only PARSE_ERROR records from an existing report."""
+    report_path = output_dir / 're_id_risk_report.json'
+    dataset_path = output_dir / 'finetune' / 'dataset.jsonl'
+    if not report_path.exists():
+        print("No existing report to retry.", file=sys.stderr)
+        sys.exit(1)
+
+    report = json.loads(report_path.read_text())
+    failed_sources = {
+        a['_source'] for a in report['assessments']
+        if a.get('risk_level') in ('PARSE_ERROR', 'ERROR')
+    }
+    if not failed_sources:
+        print("No errors to retry.")
+        return
+
+    records_by_source = {}
+    with open(dataset_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                r = json.loads(line)
+                src = r.get('metadata', {}).get('source', '')
+                if src in failed_sources:
+                    records_by_source[src] = r
+
+    if not quiet:
+        print(f"\nRetrying {len(failed_sources)} failed record(s) with max_tokens=8192...\n")
+
+    client = anthropic.Anthropic()
+    for i, (src, record) in enumerate(records_by_source.items(), 1):
+        flags = record.get('metadata', {}).get('review_flags', 0)
+        if not quiet:
+            print(f"  [{i}/{len(records_by_source)}] {src}  ({flags} PII flags)...")
+        try:
+            result = _assess_record(client, record)
+            if not quiet:
+                print(f"         → {result.get('risk_level', '?')}")
+        except Exception as exc:
+            if not quiet:
+                print(f"         → ERROR: {exc}")
+            result = {
+                '_source': src,
+                '_doc_type': record.get('metadata', {}).get('doc_type', ''),
+                '_review_flags': flags,
+                'risk_level': 'ERROR',
+                'risk_summary': str(exc),
+            }
+        # Patch into report
+        for j, a in enumerate(report['assessments']):
+            if a['_source'] == src:
+                report['assessments'][j] = result
+                break
+
+    # Recompute summary
+    risk_dist: dict[str, int] = {}
+    for a in report['assessments']:
+        level = a.get('risk_level', 'UNKNOWN')
+        risk_dist[level] = risk_dist.get(level, 0) + 1
+    highest = max(
+        (a.get('risk_level', 'LOW') for a in report['assessments']),
+        key=lambda l: _RISK_ORDER.get(l, 0),
+        default='LOW',
+    )
+    report['risk_distribution'] = risk_dist
+    report['highest_risk_level'] = highest
+    report['generated_at'] = datetime.now(timezone.utc).isoformat()
+
+    report_path.write_text(json.dumps(report, indent=2))
+    if not quiet:
+        print(f"\n  Report updated → {report_path}")
+
+    _append_risk_section(output_dir / 'summary.html', report)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Adversarial re-identification risk assessment via Claude API.'
     )
     parser.add_argument('--output', required=True, type=Path,
                         help='Pipeline output directory (contains finetune/dataset.jsonl)')
-    parser.add_argument('--samples', type=int, default=20,
-                        help='Max records to assess (default: 20, highest-PII-flag first)')
+    parser.add_argument('--samples', type=int, default=0,
+                        help='Max records to assess (default: 0 = all records, highest-PII-flag first)')
+    parser.add_argument('--retry-errors', action='store_true',
+                        help='Re-run only PARSE_ERROR/ERROR records from existing report')
+    parser.add_argument('--apply', action='store_true',
+                        help='Run second_pass.py automatically after assessment completes')
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress progress output')
     args = parser.parse_args()
 
-    report = run_assessment(args.output, max_samples=args.samples, quiet=args.quiet)
+    if args.retry_errors:
+        retry_errors(args.output, quiet=args.quiet)
+        report = json.loads((args.output / 're_id_risk_report.json').read_text())
+    else:
+        report = run_assessment(args.output, max_samples=args.samples, quiet=args.quiet)
     if not report:
         sys.exit(1)
 
@@ -333,6 +417,11 @@ def main() -> None:
             print(f"  {level}: {dist[level]} record(s)")
     if 'ERROR' in dist:
         print(f"  ERROR: {dist['ERROR']} record(s) (check report for details)")
+
+    if args.apply:
+        print()
+        from second_pass import run_second_pass
+        run_second_pass(args.output, quiet=args.quiet)
 
 
 if __name__ == '__main__':
