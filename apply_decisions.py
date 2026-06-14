@@ -16,13 +16,16 @@ For each flag marked "restore", this script:
 import argparse
 import csv
 import json
+import shutil
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cleaner import clean
 from chunker import chunk, count_tokens
-from pii import strip_pii
+from pii import strip_pii, _get_engines, _analyze_chunked, _faker_replace
+from pii import HIGH_CONFIDENCE, LOW_CONFIDENCE
 from reader import read_file
 from classifier import classify
 from reporter import generate_reports
@@ -64,11 +67,6 @@ def reprocess_file(source_path: Path, exclusions: set, output_dir: Path,
         return provenance_rec
 
     text = clean(read_result.text)
-
-    # Run PII stripping with exclusions
-    from presidio_analyzer import Pattern, PatternRecognizer
-    from pii import _get_engines, _analyze_chunked, _faker_replace, _token_replace
-    from pii import HIGH_CONFIDENCE, LOW_CONFIDENCE
 
     analyzer, _ = _get_engines()
     all_results = _analyze_chunked(analyzer, text)
@@ -178,9 +176,6 @@ def _write_audit_record(output_dir: Path, decisions_src: Path,
     Archive the decisions CSV into output/review/ and append a human_review
     entry to provenance.json. Returns the path of the archived decisions file.
     """
-    from datetime import datetime, timezone
-    import shutil
-
     timestamp = datetime.now(timezone.utc).isoformat()
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
 

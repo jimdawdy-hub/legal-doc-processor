@@ -35,6 +35,12 @@ PRIVATE_SIGNALS = [
 
 
 def classify(path: Path, text: str) -> ClassifyResult:
+    """Classify a document by type from its extension and content.
+
+    Note: .txt files have no extension shortcut and rely entirely on content
+    signals. A .txt file containing email text won't get automatic 'private'
+    classification the way .eml/.msg files do — it must match content patterns.
+    """
     ext = path.suffix.lower()
 
     if ext in ('.eml', '.msg'):

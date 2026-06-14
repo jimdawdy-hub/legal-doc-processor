@@ -7,6 +7,28 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.0] — 2026-06-14
+
+### Added
+
+- **Legal disclaimer** — Added prominent disclaimer to README stating that AI makes mistakes and the user is solely responsible for verifying all output is PII-free before use.
+- **`utils.py`** — Shared module for `sha256_file()` and `SUPPORTED_EXTENSIONS`, eliminating duplication between `pipeline.py`, `provenance.py`, and `reader.py`.
+- **Overlap-safe PII replacement** — `pii.py` now deduplicates overlapping Presidio entities before applying Faker substitutions, preventing offset corruption when Presidio returns overlapping spans.
+- **Configurable Claude model** — `re_id_risk.py` accepts `--model` flag and `RE_ID_MODEL` env var (default: `claude-opus-4-7`), allowing cost-sensitive users to use cheaper models.
+- **Concurrency locking** — `pipeline.py` uses `multiprocessing.Lock` to protect shared file writes (`review_log.jsonl`, `dataset.jsonl`) when `--workers > 1`.
+
+### Changed
+
+- **`pii.py`** — Replaced MD5 with SHA-256 for date offset seeding (consistency + avoids deprecation warnings on some Python builds).
+- **`apply_decisions.py`** — Moved all imports to module level for fail-fast error detection.
+- **`classifier.py`** — Added docstring documenting the `.txt` classification limitation.
+- **`cleaner.py`** — Added comment explaining the numbered-list tradeoff in line-number stripping.
+- **`chunker.py`** — Added docstring to `_get_encoder()` explaining the global singleton's concurrency semantics.
+- **`pipeline.py`** — Added docstring to `_caselaw_meta()` documenting its regex limitations for non-standard citation formats.
+- **`second_pass.py`** — Removed dead `pass` statement in file processing loop.
+
+---
+
 ## [0.3.0] — 2026-05-17
 
 ### Added
@@ -72,4 +94,7 @@ Initial release.
 
 - **56 pytest tests** covering all modules.
 
+[0.4.0]: https://github.com/jimdawdy-hub/legal-doc-processor/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/jimdawdy-hub/legal-doc-processor/releases/tag/v0.3.0
+[0.2.0]: https://github.com/jimdawdy-hub/legal-doc-processor/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jimdawdy-hub/legal-doc-processor/releases/tag/v0.1.0

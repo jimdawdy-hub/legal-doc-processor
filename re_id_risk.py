@@ -16,11 +16,14 @@ Output:
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
+
+DEFAULT_MODEL = os.environ.get('RE_ID_MODEL', 'claude-opus-4-7')
 
 _SYSTEM_PROMPT = """\
 You are a privacy expert and adversarial re-identification researcher. Your sole job is \
@@ -73,7 +76,7 @@ def _sample_text(text: str) -> str:
     )
 
 
-def _assess_record(client: anthropic.Anthropic, record: dict) -> dict:
+def _assess_record(client: anthropic.Anthropic, record: dict, model: str = DEFAULT_MODEL) -> dict:
     meta = record.get('metadata', {})
     text = record.get('text', '')
     source = meta.get('source', 'unknown')
@@ -91,7 +94,7 @@ def _assess_record(client: anthropic.Anthropic, record: dict) -> dict:
     )
 
     with client.messages.stream(
-        model='claude-opus-4-7',
+        model=model,
         max_tokens=8192,
         thinking={"type": "adaptive"},
         system=[{
@@ -133,7 +136,8 @@ def _assess_record(client: anthropic.Anthropic, record: dict) -> dict:
 _RISK_ORDER = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
 
 
-def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False) -> dict:
+def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False,
+                   model: str = DEFAULT_MODEL) -> dict:
     dataset_path = output_dir / 'finetune' / 'dataset.jsonl'
     if not dataset_path.exists():
         print(f"No finetune dataset at {dataset_path}", file=sys.stderr)
@@ -154,7 +158,7 @@ def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False)
         print(f"\nRe-identification Risk Assessment")
         print(f"  Dataset:  {dataset_path}")
         print(f"  Records:  {len(records)} total, assessing {len(samples)}")
-        print(f"  Model:    claude-opus-4-7\n")
+        print(f"  Model:    {model}\n")
 
     client = anthropic.Anthropic()
     assessments = []
@@ -166,7 +170,7 @@ def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False)
         if not quiet:
             print(f"  [{i:2d}/{len(samples)}] {source}  ({flags} PII flags)...")
         try:
-            result = _assess_record(client, record)
+            result = _assess_record(client, record, model=model)
             assessments.append(result)
             if not quiet:
                 level = result.get('risk_level', '?')
@@ -195,6 +199,7 @@ def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False)
 
     report = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
+        'model': model,
         'total_records_in_dataset': len(records),
         'records_assessed': len(assessments),
         'risk_distribution': risk_dist,
@@ -278,7 +283,7 @@ def _append_risk_section(html_path: Path, report: dict) -> None:
 <!-- re-id-risk-section -->
 <h2 style="margin-top:36px">Re-Identification Risk Assessment</h2>
 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:12px;color:#475569">
-  Assessed by <strong>claude-opus-4-7</strong> (adversarial framing) &nbsp;·&nbsp; {generated} UTC &nbsp;·&nbsp;
+  Assessed by <strong>{_hesc(report.get('model', DEFAULT_MODEL))}</strong> (adversarial framing) &nbsp;·&nbsp; {generated} UTC &nbsp;·&nbsp;
   {report.get('records_assessed',0)} of {report.get('total_records_in_dataset',0)} records sampled (highest PII-flag count first)
   &nbsp;·&nbsp; Overall highest risk: <strong style="color:{_risk_text_colour(highest)}">{_hesc(highest)}</strong>
 </div>
@@ -309,7 +314,8 @@ def _hesc(s: str) -> str:
 
 # ---------------------------------------------------------------------------
 
-def retry_errors(output_dir: Path, quiet: bool = False) -> None:
+def retry_errors(output_dir: Path, quiet: bool = False,
+                  model: str = DEFAULT_MODEL) -> None:
     """Re-run only PARSE_ERROR records from an existing report."""
     report_path = output_dir / 're_id_risk_report.json'
     dataset_path = output_dir / 'finetune' / 'dataset.jsonl'
@@ -345,7 +351,7 @@ def retry_errors(output_dir: Path, quiet: bool = False) -> None:
         if not quiet:
             print(f"  [{i}/{len(records_by_source)}] {src}  ({flags} PII flags)...")
         try:
-            result = _assess_record(client, record)
+            result = _assess_record(client, record, model=model)
             if not quiet:
                 print(f"         → {result.get('risk_level', '?')}")
         except Exception as exc:
@@ -397,15 +403,18 @@ def main() -> None:
                         help='Re-run only PARSE_ERROR/ERROR records from existing report')
     parser.add_argument('--apply', action='store_true',
                         help='Run second_pass.py automatically after assessment completes')
+    parser.add_argument('--model', type=str, default=None,
+                        help='Claude model to use (default: from RE_ID_MODEL env var or claude-opus-4-7)')
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress progress output')
     args = parser.parse_args()
 
     if args.retry_errors:
-        retry_errors(args.output, quiet=args.quiet)
+        retry_errors(args.output, quiet=args.quiet, model=args.model or DEFAULT_MODEL)
         report = json.loads((args.output / 're_id_risk_report.json').read_text())
     else:
-        report = run_assessment(args.output, max_samples=args.samples, quiet=args.quiet)
+        report = run_assessment(args.output, max_samples=args.samples, quiet=args.quiet,
+                                model=args.model or DEFAULT_MODEL)
     if not report:
         sys.exit(1)
 

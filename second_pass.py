@@ -261,8 +261,6 @@ def run_second_pass(
         stats = _patch_jsonl(p, patterns, dry_run=dry_run, verbose=not quiet)
         file_stats.append(stats)
         total_subs += stats['substitutions']
-        if not quiet and stats['substitutions']:
-            pass  # already printed inside _patch_jsonl
 
     if not quiet:
         print(f"  Total substitutions: {total_subs} across {len(jsonl_files)} file(s)")

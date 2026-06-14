@@ -1,13 +1,14 @@
-import hashlib
 import json
 import re
 import shutil
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from multiprocessing import Lock
 from pathlib import Path
 from typing import Optional
 
+from utils import sha256_file, SUPPORTED_EXTENSIONS
 from reader import read_file
 from classifier import classify
 from cleaner import clean
@@ -17,20 +18,21 @@ from writer import write_rag_chunks, write_finetune_record
 from provenance import ProvenanceManifest
 from reporter import generate_reports
 
-
-SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg', '.txt'}
-
 # Priority when multiple versions of the same document exist.
 # Lower number = higher priority (will be processed; others skipped).
 _EXT_PRIORITY = {'.txt': 0, '.pdf': 1, '.docx': 2, '.pptx': 3, '.eml': 4, '.msg': 5}
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for block in iter(lambda: f.read(65536), b''):
-            h.update(block)
-    return h.hexdigest()
+_write_lock: Optional[Lock] = None
+
+
+def _init_write_lock(lock: Lock) -> None:
+    global _write_lock
+    _write_lock = lock
+
+
+def _get_write_lock() -> Optional[Lock]:
+    return _write_lock
 
 
 _OCR_SUFFIXES = ('.ocr', '-ocr', '_ocr', '-ocr.pdf', ' searchable copy')
@@ -65,7 +67,7 @@ def _select_best_versions(files: list, skip_log: list) -> list:
     deduped = []
     for f in sorted(files):
         try:
-            h = _sha256(f)
+            h = sha256_file(f)
         except OSError:
             deduped.append(f)
             continue
@@ -156,9 +158,16 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
         if pii_result and pii_result.review_flags:
             review_log = output_dir / 'review' / 'review_log.jsonl'
             review_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(review_log, 'a') as f:
-                for flag in pii_result.review_flags:
-                    f.write(json.dumps(flag) + '\n')
+            lock = _get_write_lock()
+            if lock:
+                with lock:
+                    with open(review_log, 'a') as f:
+                        for flag in pii_result.review_flags:
+                            f.write(json.dumps(flag) + '\n')
+            else:
+                with open(review_log, 'a') as f:
+                    for flag in pii_result.review_flags:
+                        f.write(json.dumps(flag) + '\n')
 
         if doc_type in ('caselaw', 'published'):
             extra = _caselaw_meta(text) if doc_type == 'caselaw' else {}
@@ -176,6 +185,7 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
                 review_flags=flag_count,
                 token_count=token_count,
                 output_file=output_dir / 'finetune' / 'dataset.jsonl',
+                lock=_get_write_lock(),
             )
 
     return ProcessResult(
@@ -193,6 +203,12 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
 
 
 def _caselaw_meta(text: str) -> dict:
+    """Extract citation metadata from the first 2000 chars of caselaw text.
+
+    Limitations: only matches standard federal reporter formats (e.g. "123 F.3d 456").
+    State court opinions, unpublished orders, and non-standard citation formats
+    will not be captured — those fields simply won't appear in the output metadata.
+    """
     meta = {}
     m = re.search(r'(\w[\w\s,\.]+v\.\s+[\w\s,\.]+,\s+\d+\s+\S+\s+\d+)', text[:2000])
     if m:
@@ -237,7 +253,10 @@ def process_directory(
     results = []
 
     if workers > 1:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
+        lock = Lock()
+        with ProcessPoolExecutor(max_workers=workers,
+                                  initializer=_init_write_lock,
+                                  initargs=(lock,)) as ex:
             futures = {ex.submit(process_file, f, output_dir, dry_run): f for f in files}
             for fut in as_completed(futures):
                 results.append(fut.result())

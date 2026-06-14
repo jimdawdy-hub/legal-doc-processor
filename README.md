@@ -254,6 +254,22 @@ python3.12 -m pytest tests/ -v
 
 **For AI red-team:** Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
 
+## Legal Disclaimer
+
+**This tool uses artificial intelligence to detect and redact personally identifiable information (PII). AI systems make mistakes.** No automated PII detection or re-identification risk assessment is foolproof. False negatives (missed PII) and false positives (incorrectly flagged text) are inevitable.
+
+**The user is solely responsible for verifying that all output documents are free of PII before use.** This includes, but is not limited to:
+
+- Manually reviewing all flagged entities in `review_log.jsonl` and the interactive `summary.html` report
+- Running the AI red-team verification pass (`re_id_risk.py`) and reviewing its findings
+- Checking `re_id_risk_report.json` for any `HIGH` or `CRITICAL` risk records and acting on the recommendations
+- Inspecting the OCR queue for documents that bypassed automated processing
+- Conducting your own independent review of a sample of output records before distributing or using the dataset
+
+This tool is provided as a processing aid, not as a guarantee of compliance with any privacy law or regulation (including but not limited to HIPAA, GDPR, CCPA, state bar ethics rules, or court protective orders). Consult qualified legal counsel regarding your specific compliance obligations.
+
+**By using this tool, you acknowledge that you understand these limitations and accept full responsibility for the accuracy and legality of any output.**
+
 ## License
 
 MIT

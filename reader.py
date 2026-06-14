@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from utils import SUPPORTED_EXTENSIONS
+
 from pdfminer.high_level import extract_text as pdfminer_extract
 
 try:
@@ -32,9 +34,6 @@ class ReadResult:
     page_count: Optional[int] = None
     ocr: bool = False
     ocr_confidence: Optional[float] = None
-
-
-SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg', '.txt'}
 
 
 def read_file(path: Path) -> Optional['ReadResult']:

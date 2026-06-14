@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import List, Optional
 
+from utils import sha256_file
+
 from faker import Faker
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from presidio_anonymizer import AnonymizerEngine
@@ -140,7 +142,7 @@ def _doc_date_offset(text: str) -> int:
     Seeded by document content hash so re-running the same doc yields the same offset.
     Range: +180 to +730 days (shifts into the future, preserves all intervals).
     """
-    h = int(hashlib.md5(text[:4096].encode('utf-8', errors='replace')).hexdigest(), 16)
+    h = int(hashlib.sha256(text[:4096].encode('utf-8', errors='replace')).hexdigest(), 16)
     return 180 + (h % 551)  # 180–730 days
 
 
@@ -222,11 +224,26 @@ def _analyze_chunked(analyzer, text: str) -> list:
     return all_results
 
 
+def _deduplicate_overlaps(entities: list) -> list:
+    """Remove overlapping entities, keeping the one that starts earliest."""
+    if not entities:
+        return entities
+    sorted_ents = sorted(entities, key=lambda x: (x.start, -(x.end - x.start)))
+    deduped = [sorted_ents[0]]
+    for ent in sorted_ents[1:]:
+        prev = deduped[-1]
+        if ent.start < prev.end:
+            continue
+        deduped.append(ent)
+    return deduped
+
+
 def _faker_replace(text: str, entities: list) -> str:
     fake = Faker()
     Faker.seed(0)
     substitution_table: dict = {}
     date_offset = _doc_date_offset(text)
+    entities = _deduplicate_overlaps(entities)
 
     for r in sorted(entities, key=lambda x: x.start, reverse=True):
         original = text[r.start:r.end]

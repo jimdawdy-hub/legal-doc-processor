@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from chunker import Chunk
 
@@ -48,6 +48,7 @@ def write_finetune_record(
     review_flags: int,
     token_count: int,
     output_file: Path,
+    lock: Optional[object] = None,
 ) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -61,5 +62,11 @@ def write_finetune_record(
             'token_count': token_count,
         },
     }
-    with open(output_file, 'a') as f:
-        f.write(json.dumps(record) + '\n')
+    line = json.dumps(record) + '\n'
+    if lock:
+        with lock:
+            with open(output_file, 'a') as f:
+                f.write(line)
+    else:
+        with open(output_file, 'a') as f:
+            f.write(line)

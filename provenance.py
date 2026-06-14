@@ -1,20 +1,10 @@
 import csv
-import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    try:
-        with open(path, 'rb') as f:
-            for block in iter(lambda: f.read(65536), b''):
-                h.update(block)
-    except FileNotFoundError:
-        return ''
-    return h.hexdigest()
+from utils import sha256_file
 
 
 class ProvenanceManifest:
@@ -74,7 +64,7 @@ class ProvenanceManifest:
         self._files.append({
             'original_filename': original_path.name,
             'source_path': str(original_path.resolve()),
-            'sha256': _sha256(original_path),
+            'sha256': sha256_file(original_path),
             'doc_type': doc_type,
             'classification_confidence': round(classification_confidence, 3),
             'date_processed': datetime.now(timezone.utc).isoformat(),

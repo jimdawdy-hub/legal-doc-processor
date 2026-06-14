@@ -32,6 +32,9 @@ _enc = None
 
 
 def _get_encoder():
+    """Return a cached tiktoken encoder. Not safe for concurrent initialization
+    across processes, but fine for single-process and ProcessPoolExecutor use
+    (each worker gets its own copy after fork)."""
     global _enc
     if _enc is None:
         _enc = tiktoken.get_encoding('cl100k_base')
