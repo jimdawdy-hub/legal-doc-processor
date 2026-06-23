@@ -1,0 +1,323 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{microtype}
+
+\title{Hybrid De-identification of Legal Documents for Machine Learning:\\
+A Multi-Stage Pipeline Combining NER, Pseudonymization, and LLM-Guided Quasi-Identifier Redaction}
+
+\author{%
+  \textit{Based on the \texttt{legal-doc-processor} open-source system}\\
+  \url{https://github.com/} % repository URL to be filled by distributor
+}
+
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Preparing legal corpora for retrieval-augmented generation (RAG) and fine-tuning requires de-identification that goes beyond standard named-entity recognition (NER). Legal pleadings, client communications, and medical-malpractice materials retain \emph{quasi-identifiers}---case numbers, uncommon surnames, treating physicians, and facility-specific narratives---that can re-identify individuals even when conventional personally identifiable information (PII) has been removed. We describe \texttt{legal-doc-processor}, an open-source pipeline that (1) classifies documents by privacy sensitivity, (2) applies confidence-gated NER-based detection with pseudonymization for training data, (3) routes borderline detections to human review, and (4) optionally subjects outputs to an adversarial large language model (LLM) re-identification assessment followed by targeted second-pass redaction. On a real personal-injury malpractice folder (60 source documents, 49 fine-tuning records), a first pass using Microsoft Presidio produced 7{,}145 entity flags, yet 18 of 20 sampled records remained at HIGH or CRITICAL re-identification risk; a second pass applied over 15{,}000 additional substitutions. We argue that legal-document de-identification for ML should be treated as a \emph{hybrid} problem spanning NER, domain routing, pseudonymization policy, human oversight, and quasi-identifier analysis rather than as a single NER pass.
+\end{abstract}
+
+\section{Introduction}
+
+Law firms, courts, and legal technology vendors increasingly seek to convert document collections into datasets suitable for large language model (LLM) fine-tuning and retrieval-augmented generation (RAG). Unlike published case law, client-facing materials---pleadings, emails, deposition transcripts, and internal case notes---contain sensitive identifiers subject to privacy regulation, protective orders, and professional ethics obligations.
+
+Automated de-identification tools developed for clinical text (e.g., HIPAA Safe Harbor field removal) or general-purpose PII scanners often underperform on legal corpora for three reasons:
+\begin{enumerate}[noitemsep]
+  \item \textbf{Domain-specific identifiers.} Court docket numbers, caption lines, and attorney-of-record blocks are not standard PII types in off-the-shelf recognizers.
+  \item \textbf{Quasi-identification.} A combination of procedure type, incident date, facility, and geography may uniquely identify a plaintiff without any surviving explicit name.
+  \item \textbf{Dual use of public material.} Published opinions and CLE materials should remain citation-rich for RAG, while private matter files require aggressive stripping---a single corpus may require \emph{selective} de-identification.
+\end{enumerate}
+
+This paper documents the approach implemented in \texttt{legal-doc-processor}, an open-source Python pipeline that ingests PDF, DOCX, PPTX, EML, MSG, and plain-text files and emits JSONL datasets with provenance manifests. Our contribution is architectural and empirical rather than algorithmic: we describe a production-oriented multi-stage design, specify its confidence-gated replacement policies, and report operational results from a malpractice case folder illustrating systematic failure modes of NER-only de-identification.
+
+\section{Related Work}
+
+\textbf{Clinical de-identification.} Systems such as MIT's de-id tools, cTAKES, and commercial HIPAA-oriented products target clinical notes with annotated corpora (e.g., i2b2). Legal text differs in structure (captions, procedural posture, citations) and in the prominence of quasi-identifiers outside HIPAA's 18 Safe Harbor categories.
+
+\textbf{General PII detection.} Microsoft Presidio~\cite{presidio} combines spaCy NER with regex recognizers and context-aware scoring. It is effective on emails, phone numbers, and Social Security numbers but does not treat court case numbers or law-firm matter identifiers as first-class entities.
+
+\textbf{Privacy models.} Formal $k$-anonymity, $l$-diversity, and differential privacy provide mathematical guarantees under stated adversary models. The system described here does \emph{not} implement or verify such guarantees; it instead pursues \emph{operational} risk reduction through detection, pseudonymization, audit trails, human review, and adversarial LLM assessment.
+
+\textbf{LLM-assisted privacy.} Recent work explores LLMs for PII detection and document redaction. We use an LLM not as the primary detector but as an \emph{adversarial reviewer} after a conventional first pass, targeting quasi-identifiers that survive NER.
+
+\section{System Overview}
+
+The pipeline is modular: each stage exposes a narrow interface orchestrated by a single entry point (\texttt{process.py}). Figure~\ref{fig:pipeline} summarizes the flow.
+
+\begin{figure}[ht]
+\centering
+\fbox{\parbox{0.92\linewidth}{\small
+\textbf{Input} (PDF, DOCX, PPTX, EML, MSG, TXT)
+$\rightarrow$ \textbf{Read} (text extraction; OCR if needed)
+$\rightarrow$ \textbf{Classify} (caselaw / published / private / uncertain)
+$\rightarrow$ \textbf{Clean} (legal noise removal)
+$\rightarrow$ \textbf{De-identify} (private \& uncertain only)
+$\rightarrow$ \textbf{Chunk} (token-aware splitting)
+$\rightarrow$ \textbf{Write} (RAG and/or finetune JSONL)
+$\rightarrow$ \textbf{Provenance \& reports}
+$\rightarrow$ [\textbf{Optional}] LLM re-ID risk assessment
+$\rightarrow$ [\textbf{Optional}] second-pass redaction
+$\rightarrow$ [\textbf{Optional}] human review corrections
+}}
+\caption{End-to-end processing pipeline. De-identification applies only to \texttt{private} and \texttt{uncertain} documents.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Document-type routing}
+
+Classification is rule-based (no ML classifier), scoring regex signals over the first 5{,}000 characters plus extension shortcuts. Table~\ref{tab:routing} shows how document type determines downstream behavior.
+
+\begin{table}[ht]
+\centering
+\caption{Document-type routing matrix.}
+\label{tab:routing}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Type} & \textbf{PII stripped} & \textbf{RAG output} & \textbf{Finetune output} \\
+\midrule
+\texttt{caselaw}     & No  & Yes (512 tokens)  & No \\
+\texttt{published}   & No  & Yes (512 tokens)  & Yes (full doc) \\
+\texttt{private}     & Yes & No                & Yes (2048 tokens) \\
+\texttt{uncertain}   & Yes (conservative) & No & Yes (flagged) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Extension shortcuts assign high-confidence labels: \texttt{.eml} and \texttt{.msg} $\rightarrow$ \texttt{private} (0.99); \texttt{.pptx} $\rightarrow$ \texttt{published} (0.90). Content signals include federal and state citation patterns (\texttt{caselaw}), volume/issue/ISSN markers (\texttt{published}), and email headers, party captions, and attorney blocks (\texttt{private}). If the winning normalized score falls below 0.60, the document is labeled \texttt{uncertain} and treated as \texttt{private} for PII purposes---a conservative default for ambiguous client material.
+
+\subsection{Ingestion and OCR quality gate}
+
+Text PDFs are extracted with \texttt{pdfminer.six}; scanned PDFs trigger \texttt{ocrmypdf} and Tesseract when extracted text falls below 100 characters. Mean word confidence is computed from hOCR output on the first three pages. Documents with mean confidence below 70\% are copied to a review queue and excluded from the dataset, reducing OCR-induced entity-boundary errors that propagate into missed PII.
+
+\subsection{Legal text cleaning}
+
+Before detection, a cleaning stage removes artifacts common in legal corpora: Westlaw/Lexis annotation lines, repeated short headers and footers ($\geq 3$ occurrences), leading line numbers in pleadings ($\texttt{\^{}\textbackslash d+\textbackslash s}$), smart-quote normalization, and excess whitespace. Cleaning improves NER precision but does not itself remove identifiers.
+
+\section{First-Pass De-identification}
+
+\subsection{Detection stack}
+
+Detection uses Microsoft Presidio's \texttt{AnalyzerEngine} with spaCy's \texttt{en\_core\_web\_lg} model and English-language entity types:
+\begin{multline*}
+\texttt{PERSON},\ \texttt{PHONE\_NUMBER},\ \texttt{EMAIL\_ADDRESS},\ \texttt{LOCATION},\\
+\texttt{US\_SSN},\ \texttt{DATE\_TIME},\ \texttt{US\_BANK\_NUMBER},\ \texttt{CREDIT\_CARD},\\
+\texttt{US\_PASSPORT},\ \texttt{US\_DRIVER\_LICENSE},\ \texttt{IP\_ADDRESS},\ \texttt{MEDICAL\_LICENSE}.
+\end{multline*}
+
+A supplemental \texttt{PatternRecognizer} registers the regex $\texttt{\textbackslash b\textbackslash d\{3\}-\textbackslash d\{2\}-\textbackslash d\{4\}\textbackslash b}$ for US Social Security numbers at confidence 0.90, with context words \emph{ssn}, \emph{social security}, ensuring formatted SSNs are caught even when Presidio's validation scoring is weak.
+
+Documents exceeding 900{,}000 characters are analyzed in chunks to remain under spaCy's approximate one-million-character limit; entity offsets are adjusted to global positions before replacement.
+
+\subsection{Confidence-gated triage}
+
+Each detected span receives a Presidio confidence score $s \in [0,1]$. The pipeline applies three thresholds (Table~\ref{tab:confidence}).
+
+\begin{table}[ht]
+\centering
+\caption{Confidence-gated redaction policy.}
+\label{tab:confidence}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Score} & \textbf{Action} \\
+\midrule
+$s \geq 0.85$ & Auto-redact \\
+$0.50 \leq s < 0.85$ & Redact and log to human review queue \\
+$s < 0.50$ & Retain (accepted false-negative risk) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Medium-confidence entities are redacted \emph{and} written to \texttt{review\_log.jsonl} with $\pm 60$ characters of context, entity type, original text, and confidence---enough for a reviewer to distinguish, e.g., a judge's name from a client's name without exposing the full document in the log.
+
+Overlapping spans are deduplicated before replacement by keeping the earliest-starting span, preventing offset corruption from nested entities.
+
+\subsection{Replacement strategies}
+
+The pipeline supports two output modes selected by downstream use:
+
+\paragraph{Fine-tuning (pseudonymization).}
+Detected strings are replaced with type-matched synthetic values from Faker. A per-document substitution table ensures \emph{co-reference consistency}: identical original strings map to identical fake values within a document, preserving narrative coherence for QLoRA-style fine-tuning.
+
+\paragraph{Dates.}
+\texttt{DATE\_TIME} entities are not replaced with random Faker dates. Instead, each document receives a stable offset $\Delta$ in days computed as
+\[
+\Delta = 180 + \bigl(h \bmod 551\bigr),
+\]
+where $h$ is the integer value of $\mathrm{SHA\text{-}256}$ applied to the first 4{,}096 characters of document text. All dates in the document are shifted by $\Delta$ using format-preserving reformatting (slash, dash, ISO, and month-name styles). This preserves \emph{temporal intervals} between events---often legally salient---while removing calendar dates that could support re-identification.
+
+\paragraph{RAG (token masking).}
+For retrieval-oriented output, entities are replaced with typed bracket tokens (\texttt{[PERSON]}, \texttt{[EMAIL\_ADDRESS]}, etc.). The main pipeline does not emit RAG chunks for \texttt{private} documents; token mode is available in the de-identification module for alternative deployments.
+
+\subsection{Metadata anonymization}
+
+Fine-tuning records use anonymized source identifiers of the form \texttt{anon\_XXXXXXXX} derived from a hash of the original filename. Original filenames and SHA-256 hashes of source files are retained only in \texttt{provenance.json} for licensing and chain-of-custody, not in training records.
+
+\section{Human-in-the-Loop Review}
+
+After each run, an interactive HTML summary and CSV export present all medium-confidence flags. Reviewers may batch-approve redactions or mark false positives for \emph{restoration}. Approved restorations trigger a re-processing pass that excludes specified entity strings from redaction and patches the dataset. Decisions are archived with reviewer identity and appended to the provenance manifest, supporting audit requirements common in regulated legal workflows.
+
+This design reflects a practical trade-off: fully automated redaction maximizes recall at the cost of false positives (e.g., redacting generic place names or judicial titles), while manual review of \emph{only} borderline detections keeps human effort bounded.
+
+\section{Adversarial Re-identification Assessment}
+
+\subsection{Motivation}
+
+NER-based first passes excel at structured PII but systematically miss legal quasi-identifiers. Table~\ref{tab:failures} summarizes failure modes observed in operational testing.
+
+\begin{table}[ht]
+\centering
+\caption{Common Presidio failure modes on legal/medical matter files and corresponding second-pass handling.}
+\label{tab:failures}
+\small
+\begin{tabular}{@{}p{2.8cm}p{3.2cm}p{3.5cm}@{}}
+\toprule
+\textbf{Missed item} & \textbf{Cause} & \textbf{Second-pass action} \\
+\midrule
+Uncommon surnames & Absent from spaCy NER training & \texttt{[PERSON]} \\
+Court case numbers & Not a standard PII type & \texttt{[CASE\_NO]} \\
+Treating physicians & OCR errors; header layout & \texttt{[PERSON]} \\
+Named facilities & Organizations not HIPAA PHI & \texttt{[ORGANIZATION]} \\
+Quasi-ID combinations & No single field exceeds NER threshold & Narrative analysis $\rightarrow$ targeted terms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{LLM adversary model}
+
+The optional module \texttt{re\_id\_risk.py} sends fine-tuning records to a frontier LLM (default: Claude Opus) under an adversarial system prompt. The modeled adversary has access to federal and state dockets (PACER, CourtListener), news archives, provider directories, property and licensing records, and web search.
+
+For each record, the model returns structured JSON containing:
+\begin{itemize}[noitemsep]
+  \item \texttt{risk\_level} $\in \{\texttt{LOW}, \texttt{MEDIUM}, \texttt{HIGH}, \texttt{CRITICAL}\}$;
+  \item \texttt{quasi\_identifiers}: typed spans still present in text;
+  \item \texttt{reconstruction\_path}: step-by-step linkage narrative;
+  \item \texttt{additional\_redactions}: phrases recommended for removal;
+  \item \texttt{confidence} $\in [0,1]$.
+\end{itemize}
+
+Long documents are sampled at three 8{,}000-character segments (beginning, middle, end) to fit context limits while preserving structural diversity. Records are prioritized by descending Presidio review-flag count so the highest-uncertainty documents are assessed first.
+
+\subsection{Second-pass redaction}
+
+\texttt{second\_pass.py} aggregates quasi-identifier values and additional-redaction phrases across all assessments, maps quasi-identifier types to domain-specific tokens (Table~\ref{tab:tokens}), compiles case-insensitive regex patterns with word-boundary anchoring, and applies substitutions in-place to all finetune and RAG JSONL files. Longest matches are sorted first to reduce substring collisions. Bare four-digit years are excluded as overly broad. Results are logged in \texttt{provenance.json} and reflected in the HTML report.
+
+\begin{table}[ht]
+\centering
+\caption{Representative quasi-identifier type $\rightarrow$ replacement token mapping (partial).}
+\label{tab:tokens}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Quasi-identifier types} & \textbf{Token} \\
+\midrule
+\texttt{patient\_surname}, \texttt{treating\_physician}, \texttt{attorney\_names\_and\_firms} & \texttt{[PERSON]} \\
+\texttt{facility}, \texttt{hospital\_facility}, \texttt{defendant\_entity} & \texttt{[ORGANIZATION]} \\
+\texttt{case\_number}, \texttt{docket\_number}, \texttt{court/venue} & \texttt{[CASE\_NO]} \\
+\texttt{incident\_date}, \texttt{date\_of\_birth}, \texttt{filing\_date} & \texttt{[DATE]} \\
+\texttt{mrn}, \texttt{medical\_record\_number}, \texttt{ardc\_number} & \texttt{[ID\_NUMBER]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Unlike the first pass, the second pass uses \emph{irreversible token masking} rather than Faker pseudonymization, reflecting a shift from training-text naturalism to privacy hardening after risk discovery.
+
+\section{Empirical Case Study}
+
+We report results from processing a real personal-injury medical-malpractice document folder (60 source files, 49 fine-tuning records after deduplication and OCR gating).
+
+\begin{table}[ht]
+\centering
+\caption{Operational metrics, personal-injury malpractice folder.}
+\label{tab:case-study}
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Source documents & 60 \\
+Fine-tuning records emitted & 49 \\
+Presidio first-pass entity flags & 7{,}145 \\
+Red-team sample size & 20 records \\
+Sampled records at HIGH or CRITICAL risk post-Presidio & 18 / 20 (90\%) \\
+Second-pass additional substitutions & 15{,}000+ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The gap between 7{,}145 first-pass flags and 90\% HIGH/CRITICAL residual risk indicates that \emph{entity count alone is a poor proxy for de-identification quality} on legal matter files. Residual risk concentrated in case-specific surnames, docket identifiers, treating-physician names, and facility--procedure--date tuples---precisely the quasi-identifiers NER pipelines are not trained to excise.
+
+\textbf{Limitations of this evaluation.} The case study is a single matter type (US personal-injury malpractice), is not a labeled gold-standard benchmark, and the red-team sample ($n=20$) was prioritized by review-flag count. No precision/recall/F1 figures against expert annotations are reported. LLM risk ratings are themselves model judgments, not formal privacy proofs.
+
+\section{Discussion}
+
+\subsection{Pseudonymization vs.\ redaction for ML}
+
+Faker-based pseudonymization preserves readable training text and co-reference structure, which benefits fine-tuning data quality. It is \emph{not} equivalent to irreversible redaction: synthetic replacements remain structurally similar to originals, and deterministic filename hashing is not cryptographically secure anonymization. The two-pass design---pseudonymize first for naturalism, then token-mask flagged quasi-identifiers---reflects a pragmatic sequencing for legal ML datasets.
+
+\subsection{Selective de-identification}
+
+Routing \texttt{caselaw} and \texttt{published} documents around PII stripping preserves citations and party names needed for RAG over public law. Misclassification---especially labeling private matter files as \texttt{published}---is a primary systemic risk; conservative handling of \texttt{uncertain} documents mitigates false negatives at the cost of over-stripping ambiguous files.
+
+\subsection{What this system does not guarantee}
+
+The implementation explicitly disclaims regulatory compliance (HIPAA, GDPR, CCPA, bar ethics, protective orders). Low-confidence detections ($s < 0.50$) are retained by policy. No $k$-anonymity, $l$-diversity, or differential privacy bounds are computed. OCR near the 70\% threshold may introduce character errors that fragment entity spans. Second-pass regex redaction can over- or under-redact variant phrasings.
+
+\subsection{Operational recommendations}
+
+For practitioners building similar pipelines, we suggest:
+\begin{enumerate}[noitemsep]
+  \item Treat document classification as a \emph{privacy gate}, not merely a metadata label.
+  \item Log and review medium-confidence detections; do not assume high-threshold auto-redaction is sufficient.
+  \item Run adversarial quasi-identifier assessment on a sample before releasing fine-tuning corpora derived from client matter files.
+  \item Maintain provenance manifests linking anonymized outputs to hashed originals for licensing and audit.
+  \item Exclude low-confidence OCR outputs rather than feeding noisy text into NER.
+\end{enumerate}
+
+\section{Conclusion}
+
+Legal-document de-identification for machine learning requires a hybrid architecture that combines off-the-shelf NER, domain-aware routing, confidence-gated pseudonymization, human review of borderline cases, and LLM-guided adversarial assessment for quasi-identifiers. The \texttt{legal-doc-processor} system implements this architecture as an auditable open-source pipeline. Empirical results on a malpractice matter folder demonstrate that conventional Presidio-based first passes, despite thousands of entity flags, leave the majority of assessed records at high re-identification risk; a second targeted pass closes much of that gap. Future work should include annotated legal de-identification benchmarks, systematic evaluation of classification error rates, and formal privacy metrics under explicit adversary models.
+
+\section*{Acknowledgments}
+
+This paper describes the design and behavior of the open-source \texttt{legal-doc-processor} project. Implementation modules include \texttt{pii.py}, \texttt{classifier.py}, \texttt{pipeline.py}, \texttt{re\_id\_risk.py}, and \texttt{second\_pass.py}.
+
+\begin{thebibliography}{9}
+
+\bibitem{presidio}
+Microsoft Presidio: Context aware, pluggable and customizable data protection and de-identification SDK.
+\url{https://github.com/microsoft/presidio}
+
+\bibitem{spacy}
+M. Honnibal et al.,
+spaCy: Industrial-strength Natural Language Processing in Python.
+
+\bibitem{sweeney}
+L. Sweeney,
+$k$-anonymity: A model for protecting privacy,
+\emph{International Journal of Uncertainty, Fuzziness and Knowledge-Based Systems},
+10(5), 2002.
+
+\bibitem{hipaa}
+U.S. Dept.\ of Health and Human Services,
+HIPAA Administrative Simplification, Safe Harbor de-identification standard, 45 C.F.R.\ \S 164.514(b).
+
+\bibitem{elger}
+B. S. Elger and A. Caplan,
+Consent and anonymisation in research involving biobanks,
+\emph{EMBO Reports}, 2006.
+
+\bibitem{machanavajjhala}
+A. Machanavajjhala et al.,
+$l$-diversity: Privacy beyond $k$-anonymity,
+\emph{ACM TKDD}, 2007.
+
+\end{thebibliography}
+
+\end{document}
