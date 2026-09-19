@@ -40,6 +40,10 @@ ENTITY_TYPES = [
     "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "LOCATION",
     "US_SSN", "DATE_TIME", "US_BANK_NUMBER", "CREDIT_CARD",
     "US_PASSPORT", "US_DRIVER_LICENSE", "IP_ADDRESS", "MEDICAL_LICENSE",
+    # Checksum-validated healthcare identifiers presidio ships but does not
+    # put in its default registry (U11). MEDICAL_LICENSE above is its DEA
+    # certificate recognizer, which was registered all along.
+    "US_NPI", "US_MBI",
     # Safe Harbor categories the detector used to ignore (U5).
     "URL", "STREET_ADDRESS", "US_ZIP", "AGE_OVER_89",
     "MEDICAL_RECORD_NUMBER", "HEALTH_PLAN_ID", "ACCOUNT_NUMBER",
@@ -382,6 +386,8 @@ def _fake_value(entity_type: str, fake: Faker) -> str:
         'IP_ADDRESS':        fake.ipv4,
         'MEDICAL_LICENSE':   lambda: fake.numerify('ML#######'),
         'URL':               fake.url,
+        'US_NPI':            lambda: fake.numerify('##########'),
+        'US_MBI':            lambda: fake.numerify('#??#??#??##').upper(),
         'STREET_ADDRESS':    fake.street_address,
         'US_ZIP':            fake.postcode,
         # Safe Harbor (C) aggregates rather than replaces: a specific fake age

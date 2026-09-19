@@ -24,6 +24,7 @@ shape of their own and are scored on that shape alone.
 import re
 
 from presidio_analyzer import LocalRecognizer, Pattern, PatternRecognizer, RecognizerResult
+from presidio_analyzer.predefined_recognizers import UsMbiRecognizer, UsNpiRecognizer
 
 # A label immediately followed by an identifier-shaped value is strong
 # evidence, so this sits above DATE_TIME (0.85) -- otherwise a medical record
@@ -153,9 +154,39 @@ class LabelAnchoredRecognizer(LocalRecognizer):
         ]
 
 
+def build_predefined_recognizers() -> list:
+    """Presidio's own validated recognizers that its default registry omits.
+
+    Verified against the installed 2.2.362 rather than assumed:
+
+      UsNpiRecognizer      US_NPI   Luhn over the constant 80840 prefix per
+                                    CMS, plus an invalidate_result for
+                                    degenerate repeats. Valid -> 1.00, wrong
+                                    check digit -> no result at all.
+      UsMbiRecognizer      US_MBI   Positional letter/digit rules excluding
+                                    S, L, O, I, B and Z. Valid -> 0.30, an
+                                    excluded letter -> no result. The low
+                                    score is honest: an MBI has no checksum,
+                                    so this proves structural plausibility
+                                    only and will admit a well-formed fake.
+                                    Its shipped context words lift a labelled
+                                    one above the redaction floor.
+
+    Neither is in the default registry, so nothing detects them unless they
+    are registered here. MedicalLicenseRecognizer -- presidio's DEA
+    certificate recognizer, valid -> 1.00 -- already is, which is why DEA
+    needed no new code: MEDICAL_LICENSE was in ENTITY_TYPES all along.
+
+    A checksum failure removes the result rather than lowering its score, so
+    an invalid value cannot be redacted by a lowered floor later.
+    """
+    return [UsNpiRecognizer(), UsMbiRecognizer()]
+
+
 def build_recognizers() -> list:
     """Every recognizer this project adds to presidio's default registry."""
-    recognizers = [
+    recognizers = build_predefined_recognizers()
+    recognizers += [
         LabelAnchoredRecognizer(entity, synonyms)
         for entity, synonyms in LABEL_SYNONYMS.items()
     ]

@@ -122,6 +122,47 @@ def test_age_89_and_under_is_preserved(age):
     assert "90 or older" not in result.text
 
 
+# --- checksum-validated healthcare identifiers (R6, U11) ---------------------
+# These are acceptance tests against the library's behavior, not unit tests of
+# validators we wrote. US_NPI and US_MBI are absent from presidio's default
+# registry, so every assertion here goes through pii.py's configured engine --
+# instantiating a recognizer directly would pass even if registration were
+# forgotten.
+
+def test_npi_and_mbi_are_not_in_the_default_registry():
+    """The reason this unit exists. If a later presidio release adds them, this
+    test fails and the explicit registration can be reconsidered."""
+    from presidio_analyzer import AnalyzerEngine
+    default = AnalyzerEngine().get_supported_entities()
+    assert 'US_NPI' not in default
+    assert 'US_MBI' not in default
+    # DEA, by contrast, ships enabled -- which is why it needed no new code.
+    assert 'MEDICAL_LICENSE' in default
+
+@pytest.mark.parametrize('entity,valid,invalid,why', [
+    ('US_NPI', '1234567893', '1234567890', 'wrong Luhn check digit'),
+    ('US_NPI', '1234567893', '1111111111', 'degenerate repeat'),
+    ('US_MBI', '1EG4TE5MK73', '1SG4TE5MK73', 'contains excluded letter S'),
+    ('MEDICAL_LICENSE', 'AB1234563', 'AB1234567', 'wrong DEA check digit'),
+])
+def test_checksum_validated_identifier_both_directions(entity, valid, invalid, why):
+    label = {'US_NPI': 'NPI', 'US_MBI': 'Medicare MBI',
+             'MEDICAL_LICENSE': 'DEA Number'}[entity]
+    found_valid = redactable(f"Provider record.\n{label}: {valid}\n", entity)
+    assert any(valid in m for m in found_valid), f"valid {entity} not detected"
+
+    found_invalid = [m for kind, m, _ in detect(f"Provider record.\n{label}: {invalid}\n")
+                     if kind == entity]
+    assert invalid not in found_invalid, f"{entity} accepted a value with a {why}"
+
+def test_checksum_rejection_removes_the_result_rather_than_lowering_it():
+    """A rejected value must not come back when the floor drops in U7."""
+    detections = [(kind, matched, score)
+                  for kind, matched, score in detect("NPI: 1234567890\n")
+                  if kind == 'US_NPI']
+    assert detections == [], f"expected no US_NPI result at all, got {detections}"
+
+
 # --- the U4 invariant, asserted here too --------------------------------------
 
 def test_new_recognizers_preserve_every_line(lines_preserved):
