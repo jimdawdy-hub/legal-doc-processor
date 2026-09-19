@@ -15,14 +15,20 @@ to prevent, self-inflicted.
 Real reproduction material stays in the gitignored `local-notes/` directory and
 never moves out of it.
 
-There are three deliberate exceptions, all **published reference values** that
-CMS prints in its own public format documentation — not patient data:
+Three values are **published reference values** that CMS prints in its own
+public format documentation — not patient data:
 
 | Value | What it is |
 |---|---|
 | `1234567893` | NPI check-digit example, CMS *Requirements for National Provider Identifier (NPI) and NPI Check Digit* |
 | `1EG4TE5MK73` | MBI format example, CMS *Understanding the Medicare Beneficiary Identifier* |
 | `AB1234563` | DEA registration number with a valid check digit |
+
+Three more are **invented and then made checksum-valid** so a second instance
+of each format exists: `1740467307` (NPI), `BP9876547` (DEA), `2FT6WE9NQ85`
+(MBI). They were checked against presidio's validators, which rejected the
+first two attempts — a useful reminder that these recognizers reject a value
+outright rather than scoring it low.
 
 These exist so the checksum-validated recognizers can be tested in both
 directions — a valid value detected, an invalid one rejected.

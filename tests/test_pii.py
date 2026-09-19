@@ -233,6 +233,23 @@ def test_identifier_straddling_a_chunk_boundary_is_caught_once(monkeypatch):
         f"expected exactly one redaction, got {result.text.count('[US_SSN]')}"
     )
 
+@pytest.mark.parametrize('value', ['5520118', '60658', 'MRN-8830271'])
+def test_a_non_date_detected_as_a_date_is_still_replaced(monkeypatch, value):
+    """_shift_date returns its input unchanged when the value will not parse
+    as a date. Handing that back was a silent no-op redaction: the identifier
+    was detected, replaced by itself, and written into the deliverable, while
+    the scrubber counted it redacted. Measured on the corpus -- a chart number
+    and a ZIP both reached the output this way."""
+    text = f"Reference {value} recorded on intake."
+    start = text.index(value)
+    _with_detections(monkeypatch, [
+        RecognizerResult("DATE_TIME", start, start + len(value), 0.85)
+    ])
+    result = strip_pii(text, "note.pdf", output_mode='finetune')
+    assert value not in result.text, (
+        f"detected and then written straight back out: {result.text!r}"
+    )
+
 @pytest.mark.parametrize('mode', ['finetune', 'rag'])
 def test_round_trip_preserves_every_line(discharge_text, lines_preserved, mode):
     """U4's verification, through the real analyzer rather than pinned spans:

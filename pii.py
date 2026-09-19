@@ -70,7 +70,7 @@ ENTITY_TYPES = [
     # certificate recognizer, which was registered all along.
     "US_NPI", "US_MBI",
     # Safe Harbor categories the detector used to ignore (U5).
-    "URL", "STREET_ADDRESS", "US_ZIP", "AGE_OVER_89",
+    "URL", "STREET_ADDRESS", "US_ZIP", "AGE_OVER_89", "AGE_UNDER_90",
     "MEDICAL_RECORD_NUMBER", "HEALTH_PLAN_ID", "ACCOUNT_NUMBER",
     "DEVICE_SERIAL", "VEHICLE_ID", "OTHER_IDENTIFIER",
     # A labelled value no specific recognizer above claimed. Never silent:
@@ -301,10 +301,18 @@ def _build_operators(text: str, output_mode: str) -> dict:
     cache on the value makes the validation call a harmless throwaway entry and
     delivers within-document consistency at the same time.
     """
+    # Detected, recorded, and deliberately left alone: an age of 89 or under is
+    # not a Safe Harbor identifier, and replacing it destroys clinical meaning
+    # for no privacy gain. It has its own entity type so this is an explicit
+    # decision rather than a gap -- without it, DATE_TIME claims '45-year-old'
+    # and date-shifts it.
+    keep = {'AGE_UNDER_90': OperatorConfig("keep", {})}
+
     if output_mode != 'finetune':
         return {
-            entity: OperatorConfig("replace", {"new_value": f"[{entity}]"})
-            for entity in ENTITY_TYPES
+            **{entity: OperatorConfig("replace", {"new_value": f"[{entity}]"})
+               for entity in ENTITY_TYPES},
+            **keep,
         }
 
     fake = _doc_faker(text)
@@ -315,15 +323,16 @@ def _build_operators(text: str, output_mode: str) -> dict:
         def replace(value: str) -> str:
             if value not in cache:
                 if entity_type == 'DATE_TIME':
-                    cache[value] = _shift_date(value, date_offset)
+                    cache[value] = _shifted_or_surrogate(value, date_offset, fake)
                 else:
                     cache[value] = _fake_value(entity_type, fake)
             return cache[value]
         return replace
 
     return {
-        entity: OperatorConfig("custom", {"lambda": _replacer(entity)})
-        for entity in ENTITY_TYPES
+        **{entity: OperatorConfig("custom", {"lambda": _replacer(entity)})
+           for entity in ENTITY_TYPES},
+        **keep,
     }
 
 
@@ -401,6 +410,26 @@ def _clamp_over_long_spans(text: str, results: list) -> list:
         r.end = clamped
         kept.append(r)
     return kept
+
+
+def _shifted_or_surrogate(value: str, offset_days: int, fake: Faker) -> str:
+    """Shift a date, or replace a non-date that was detected as one.
+
+    _shift_date returns its input unchanged when the value will not parse as a
+    date. Handing that back was a silent no-op redaction: the identifier was
+    detected, replaced by itself, and written into the deliverable. Measured on
+    the corpus -- a chart number and a ZIP were both detected as DATE_TIME at
+    0.85 and survived, while the scrubber reported them redacted.
+
+    Detected and unremovable is the one outcome that must not be possible, so a
+    value that is not a date gets a same-shaped stand-in rather than itself.
+    """
+    shifted = _shift_date(value, offset_days)
+    if shifted != value:
+        return shifted
+    if value.isdigit():
+        return fake.numerify('#' * len(value))
+    return _fake_value('OTHER_IDENTIFIER', fake)
 
 
 def _fake_value(entity_type: str, fake: Faker) -> str:

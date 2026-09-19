@@ -1,0 +1,21 @@
+RIVERTON GENERAL EMERGENCY DEPARTMENT
+Emergency Department Note
+
+The patient, Beatrice Okonkwo, is a 93-year-old woman brought in by ambulance
+after a fall at home. Her chart number is 5520118 and her Medicare beneficiary
+identifier is 2FT6WE9NQ85. She lives alone at 412 Sycamore Terrace, Riverton,
+Illinois 60658, and her daughter can be reached at 312-555-0193.
+
+Arrival: Mar. 4, 2025 at 21:40. Discharged 2025-03-06.
+
+Prior records were faxed from the referring clinic at (312) 555-0194. The
+referring physician, Dr. Alan Petrosyan, listed his DEA registration as
+BP9876547 on the transfer paperwork.
+
+Insurance was verified. Policy Number: POL-7781204. Guarantor Account: GA-99413.
+
+Imaging showed no acute fracture. The patient was observed overnight, tolerated
+a regular diet, and was discharged home with her daughter and a referral to
+outpatient physical therapy.
+
+Correspondence: bokonkwo@example.com

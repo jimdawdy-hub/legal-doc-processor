@@ -43,6 +43,26 @@ UNLABELLED_SCORE = 0.20
 ID_VALUE_INNER = r'(?=[A-Za-z0-9\-/]*\d)[A-Za-z0-9][A-Za-z0-9\-/]{3,}\b'
 ID_VALUE = rf'\b{ID_VALUE_INNER}'
 
+# One to four capitalised words -- a person's name as a medical record writes
+# it on a labelled line. The (?-i:...) is load-bearing: the surrounding pattern
+# is compiled IGNORECASE, which made [A-Z] match any letter, so 'The patient is
+# a 45-year-old woman' matched 'is' as the patient's name.
+NAME_VALUE = r"(?-i:[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+){0,3})"
+
+# Labels that introduce a person in a medical record. Names are spaCy's job,
+# but it under-detects outside its training distribution: measured, it tagged
+# 'Priya' and left 'Ramanathan' in the text. A surviving surname plus a
+# facility plus a date is a re-identification path, and a labelled line is
+# exactly where a record puts the name it is about.
+NAME_LABELS = [
+    'patient', 'patient name', 'name', 'attending', 'attending physician',
+    'ordering provider', 'referring provider', 'referring physician',
+    'provider', 'physician', 'clinician', 'surgeon', 'consultant', 'nurse',
+    'guarantor', 'next of kin', 'emergency contact', 'responsible party',
+    'primary care provider', 'pcp', 'admitted by', 'discharged by',
+    'interpreted by', 'dictated by', 'signed by',
+]
+
 # Documented synonym lists (plan Q2). Extend these against real documents --
 # the literature is consistent that institution-specific labels are the
 # category automated systems under-detect most.
@@ -90,6 +110,19 @@ UNRESOLVED_LABEL = (
     r'(?:number|no\.?|id|code|identifier|licen[cs]e|certificate)'
 )
 
+US_STATE_NAMES = [
+    'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
+    'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho',
+    'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine',
+    'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
+    'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey',
+    'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio',
+    'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina',
+    'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia',
+    'Washington', 'West Virginia', 'Wisconsin', 'Wyoming',
+    'District of Columbia', 'Puerto Rico',
+]
+
 STREET_SUFFIXES = (
     'street|st|avenue|ave|road|rd|lane|ln|drive|dr|boulevard|blvd|court|ct|'
     'way|place|pl|terrace|ter|circle|cir|parkway|pkwy|highway|hwy|trail|trl|'
@@ -117,7 +150,7 @@ class LabelAnchoredRecognizer(LocalRecognizer):
 
     def __init__(self, supported_entity: str, labels: list = None,
                  label_regex: str = None, score: float = LABEL_ANCHORED_SCORE,
-                 name: str = None):
+                 name: str = None, value_pattern: str = None):
         super().__init__(
             supported_entities=[supported_entity],
             name=name or f"{supported_entity.title().replace('_', '')}Recognizer",
@@ -130,10 +163,18 @@ class LabelAnchoredRecognizer(LocalRecognizer):
                 re.escape(label) for label in sorted(labels, key=len, reverse=True)
             )
         self.pattern = re.compile(
-            rf'\b(?:{label_regex})\b'           # the label
-            rf'\s*(?:number|no\.?|id|code|#)?'  # an optional trailing noun
-            rf'(?:\s*[:#\-]\s*|\s+)'            # separator, or just whitespace
-            rf'(?P<value>{ID_VALUE_INNER})',
+            rf'\b(?:{label_regex})\b'                  # the label
+            rf'\s*(?:number|no\.?|id|code|#)?'         # an optional trailing noun
+            # A separator, or whitespace, optionally with a copula between --
+            # records write 'Her chart number is 5520118' as often as
+            # 'Chart Number: 5520118'.
+            rf'(?:\s*[:#\-]\s*|\s+(?:is|was|of|=)\s+|\s+)'
+            rf'(?:(?:dr|mr|mrs|ms|prof)\.?\s+)?'       # a title stays in the text
+            # A value immediately followed by a colon is itself a label, not a
+            # value -- 'Patient Portal: https://...' matched 'patient' and then
+            # read 'Portal' as the patient's name. The \b stops backtracking
+            # from satisfying the lookahead with a truncated word.
+            rf'(?P<value>{value_pattern or ID_VALUE_INNER})\b(?!\s*:)',
             re.IGNORECASE,
         )
 
@@ -247,6 +288,13 @@ def build_recognizers() -> list:
     ]
 
     recognizers.append(LabelAnchoredRecognizer(
+        "PERSON",
+        labels=NAME_LABELS,
+        value_pattern=NAME_VALUE,
+        name="LabelledNameRecognizer",
+    ))
+
+    recognizers.append(LabelAnchoredRecognizer(
         "UNRESOLVED_IDENTIFIER",
         label_regex=UNRESOLVED_LABEL,
         score=UNRESOLVED_SCORE,
@@ -288,6 +336,19 @@ def build_recognizers() -> list:
                  "state", "mailing"],
     ))
 
+    # A spelled-out state name anchors the ZIP that follows it, which a
+    # narrative note is as likely to write as a labelled field: 'Riverton,
+    # Illinois 60658'. The two-letter-abbreviation pattern above does not
+    # cover it, and no context word is nearby to lift the bare-ZIP pattern.
+    # The state name itself stays in the text -- Safe Harbor (B) removes
+    # geography *below* state level.
+    recognizers.append(LabelAnchoredRecognizer(
+        "US_ZIP",
+        labels=US_STATE_NAMES,
+        value_pattern=r'\d{5}(?:-\d{4})?',
+        name="StateNameZipRecognizer",
+    ))
+
     # Safe Harbor (L): vehicle identifiers including licence plates.
     recognizers.append(PatternRecognizer(
         supported_entity="VEHICLE_ID",
@@ -325,6 +386,23 @@ def build_recognizers() -> list:
                     r'\b(?:9\d|1\d\d)[\s-]*(?:year|yr)s?[\s-]*old\b', 0.95),
             Pattern("age_labelled",
                     r'\bage[ds]?\s*:?\s*(?:of\s+)?(?:9\d|1\d\d)\b', 0.95),
+        ],
+        global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    ))
+
+    # The counterpart, and it is a deliberate keep rather than an omission.
+    # Safe Harbor aggregates ages *over* 89 only; an ordinary age is not an
+    # identifier and replacing it destroys clinical meaning for no privacy
+    # gain. It needs a recognizer of its own because DATE_TIME matches
+    # '45-year-old' at 0.85 and would otherwise date-shift it.
+    recognizers.append(PatternRecognizer(
+        supported_entity="AGE_UNDER_90",
+        name="AgeUnder90Recognizer",
+        patterns=[
+            Pattern("age_year_old",
+                    r'\b(?:[1-9]|[1-8]\d)[\s-]*(?:year|yr)s?[\s-]*old\b', 0.95),
+            Pattern("age_labelled",
+                    r'\bage[ds]?\s*:?\s*(?:of\s+)?(?:[1-9]|[1-8]\d)\b', 0.95),
         ],
         global_regex_flags=re.IGNORECASE | re.MULTILINE,
     ))

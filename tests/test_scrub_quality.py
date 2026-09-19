@@ -38,6 +38,28 @@ def detections_for(text: str) -> list:
     return [r for r in results if r.score >= pii_module.LOW_CONFIDENCE]
 
 
+def decoded_record_text(output_dir: Path) -> str:
+    """Every output record's decoded text, concatenated per file.
+
+    Not a line-oriented grep: records are one per line, so an identifier
+    straddling a chunk split has half on one line and half on the next and
+    matches neither. Concatenating the decoded text of each file's records
+    catches it.
+    """
+    blobs = []
+    for path in sorted(output_dir.rglob('*.jsonl')):
+        parts = []
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                parts.append(json.loads(line).get('text', ''))
+            except json.JSONDecodeError:
+                parts.append(line)
+        blobs.append(''.join(parts))
+    return '\n'.join(blobs)
+
+
 def _fully_covered(span, detections) -> bool:
     start, end = span
     covered = bytearray(end - start)
@@ -64,14 +86,35 @@ def score_corpus() -> dict:
         text = (CORPUS / filename).read_text()
         detections = detections_for(text)
         truth_spans = [tuple(s) for e in entries for s in e['spans']]
+        # Measured from the scrubbed output, not from the detections, and in
+        # *both* modes.
+        #
+        # "Covered by a detection" is not the same as "removed": a chart number
+        # and a ZIP were both detected as DATE_TIME at 0.85 and then written
+        # straight back out, because the date replacement returns its input
+        # unchanged when the value will not parse as a date. Scoring on
+        # detections reported 1.00 for both.
+        #
+        # And scoring only placeholder mode missed it again, because that mode
+        # replaces through the library's own operator while the deliverable for
+        # a private document is the Faker-mode record. An identifier counts as
+        # protected only when it is gone from both.
+        scrubbed = {
+            mode: strip_pii(text, filename, output_mode=mode).text
+            for mode in ('rag', 'finetune')
+        }
 
         for entry in entries:
             category = entry['category']
             total[category] += 1
-            if all(_fully_covered(span, detections) for span in entry['spans']):
+            leaked_in = [mode for mode, out in scrubbed.items()
+                         if entry['value'] in out]
+            if not leaked_in:
                 caught[category] += 1
             else:
-                survivors[category].append(f"{filename}:{entry['value']}")
+                survivors[category].append(
+                    f"{filename}:{entry['value']} ({'+'.join(leaked_in)})"
+                )
 
         for d in detections:
             all_detections += 1
@@ -175,6 +218,88 @@ def test_an_ssn_is_covered_by_more_than_one_recognizer(monkeypatch):
     result = strip_pii("Social Security Number: 412-55-9083\n", "note.txt",
                        output_mode='rag')
     assert "412-55-9083" not in result.text
+
+# --- U10: the floors ----------------------------------------------------------
+
+# Missing one of these is a disclosure, not a degraded metric.
+HIGH_HARM = ('ssn', 'mrn', 'account_number', 'health_plan_id')
+
+# Every category has to clear this. The counts per category are small, so in
+# practice it means "no survivors"; it is written as a floor because U10's
+# corpus is a living fixture and will grow.
+RECALL_FLOOR = 0.95
+
+# KTD9's guardrail. The evidence for lowering the detection floor is that
+# downstream analysis is stable across moderate-to-high precision and collapses
+# only once precision does, so this is set to catch a collapse rather than to
+# pin the current number.
+PRECISION_FLOOR = 0.80
+
+
+def test_no_high_harm_identifier_survives(baseline):
+    """Regardless of aggregate score. An SSN, a medical record number, an
+    account number or a member number left in the text is the disclosure this
+    whole plan exists to prevent."""
+    for category in HIGH_HARM:
+        assert category in baseline['recall'], f"{category} is not in the corpus"
+        assert baseline['recall'][category] == 1.0, (
+            f"{category} survivors: {baseline['survivors'].get(category)}"
+        )
+
+def test_every_category_meets_its_recall_floor(baseline):
+    below = {
+        category: (value, baseline['survivors'].get(category))
+        for category, value in baseline['recall'].items()
+        if value < RECALL_FLOOR
+    }
+    assert not below, f"below the {RECALL_FLOOR} recall floor: {below}"
+
+def test_precision_meets_its_floor(baseline):
+    """The counterweight to a 0.30 detection floor: over-redaction is the
+    cheaper error, but only while precision holds."""
+    assert baseline['precision'] >= PRECISION_FLOOR, (
+        f"precision {baseline['precision']:.2f} is below {PRECISION_FLOOR}"
+    )
+
+
+def test_the_no_leak_search_concatenates_records_rather_than_grepping_lines(tmp_path):
+    """Output records are one per line, so an identifier straddling a chunk
+    split has half on each line and a line-oriented grep matches neither."""
+    dataset = tmp_path / 'dataset.jsonl'
+    dataset.write_text(
+        json.dumps({'text': 'Social Security Number: 412-55-'}) + '\n'
+        + json.dumps({'text': '9083 was recorded on intake.'}) + '\n'
+    )
+
+    line_oriented = [l for l in dataset.read_text().splitlines()
+                     if '412-55-9083' in l]
+    assert line_oriented == [], "the fixture does not actually straddle a split"
+
+    assert '412-55-9083' in decoded_record_text(tmp_path), (
+        "the concatenating search missed a straddling identifier"
+    )
+
+
+def test_every_line_is_preserved_corpus_wide(lines_preserved):
+    for filename in sorted(GROUND_TRUTH):
+        source = (CORPUS / filename).read_text()
+        for mode in ('finetune', 'rag'):
+            lines_preserved(source, strip_pii(source, filename, mode).text)
+
+
+def test_an_identifier_across_the_analysis_boundary_is_detected(monkeypatch):
+    """Over 900,000 characters the text is chunked. A straddling identifier is
+    a silent false negative, not an error, so it needs its own check."""
+    monkeypatch.setattr(pii_module, 'MAX_PRESIDIO_CHARS', 600)
+    monkeypatch.setattr(pii_module, 'CHUNK_OVERLAP_CHARS', 150)
+    filler = "The patient was seen in the outpatient clinic today. "
+    text = (filler * 40)[:595] + "412-55-9083" + " " + (filler * 5)
+    assert text.index("412-55-9083") < 600 < text.index("412-55-9083") + 11
+
+    scrubbed = strip_pii(text, "long.txt", output_mode='rag').text
+    assert "412-55-9083" not in scrubbed
+    assert scrubbed.count("[US_SSN]") == 1
+
 
 def test_no_leak_check_is_bound_to_ground_truth_not_to_the_tool(baseline):
     """The survivors list must come from the corpus manifest. Checking the

@@ -323,6 +323,318 @@
         ]
       }
     ],
+    "er_note_004.txt": [
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Beatrice Okonkwo",
+        "spans": [
+          [
+            78,
+            94
+          ]
+        ]
+      },
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Alan Petrosyan",
+        "spans": [
+          [
+            521,
+            535
+          ]
+        ]
+      },
+      {
+        "category": "age_over_89",
+        "safe_harbor": "C",
+        "value": "93-year-old",
+        "spans": [
+          [
+            101,
+            112
+          ]
+        ]
+      },
+      {
+        "category": "mrn",
+        "safe_harbor": "H",
+        "value": "5520118",
+        "spans": [
+          [
+            185,
+            192
+          ]
+        ]
+      },
+      {
+        "category": "health_plan_id",
+        "safe_harbor": "I",
+        "value": "2FT6WE9NQ85",
+        "spans": [
+          [
+            236,
+            247
+          ]
+        ]
+      },
+      {
+        "category": "health_plan_id",
+        "safe_harbor": "I",
+        "value": "POL-7781204",
+        "spans": [
+          [
+            645,
+            656
+          ]
+        ]
+      },
+      {
+        "category": "account_number",
+        "safe_harbor": "J",
+        "value": "GA-99413",
+        "spans": [
+          [
+            677,
+            685
+          ]
+        ]
+      },
+      {
+        "category": "license_number",
+        "safe_harbor": "K",
+        "value": "BP9876547",
+        "spans": [
+          [
+            568,
+            577
+          ]
+        ]
+      },
+      {
+        "category": "street_address",
+        "safe_harbor": "B",
+        "value": "412 Sycamore Terrace",
+        "spans": [
+          [
+            268,
+            288
+          ]
+        ]
+      },
+      {
+        "category": "city",
+        "safe_harbor": "B",
+        "value": "Riverton",
+        "spans": [
+          [
+            290,
+            298
+          ]
+        ]
+      },
+      {
+        "category": "zip",
+        "safe_harbor": "B",
+        "value": "60658",
+        "spans": [
+          [
+            309,
+            314
+          ]
+        ]
+      },
+      {
+        "category": "phone",
+        "safe_harbor": "D",
+        "value": "312-555-0193",
+        "spans": [
+          [
+            351,
+            363
+          ]
+        ]
+      },
+      {
+        "category": "fax",
+        "safe_harbor": "E",
+        "value": "(312) 555-0194",
+        "spans": [
+          [
+            476,
+            490
+          ]
+        ]
+      },
+      {
+        "category": "email",
+        "safe_harbor": "F",
+        "value": "bokonkwo@example.com",
+        "spans": [
+          [
+            890,
+            910
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "Mar. 4, 2025",
+        "spans": [
+          [
+            375,
+            387
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "2025-03-06",
+        "spans": [
+          [
+            409,
+            419
+          ]
+        ]
+      }
+    ],
+    "radiology_005.txt": [
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Terrence Whitlock",
+        "spans": [
+          [
+            60,
+            77
+          ]
+        ]
+      },
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Priya Ramanathan",
+        "spans": [
+          [
+            201,
+            217
+          ]
+        ]
+      },
+      {
+        "category": "mrn",
+        "safe_harbor": "H",
+        "value": "MRN-6640933",
+        "spans": [
+          [
+            101,
+            112
+          ]
+        ]
+      },
+      {
+        "category": "other_unique_id",
+        "safe_harbor": "R",
+        "value": "ACC-2025-88214",
+        "spans": [
+          [
+            131,
+            145
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "15 April 2025",
+        "spans": [
+          [
+            163,
+            176
+          ]
+        ]
+      },
+      {
+        "category": "license_number",
+        "safe_harbor": "K",
+        "value": "1740467307",
+        "spans": [
+          [
+            223,
+            233
+          ]
+        ]
+      },
+      {
+        "category": "device_serial",
+        "safe_harbor": "M",
+        "value": "EQ-77120-B4",
+        "spans": [
+          [
+            260,
+            271
+          ]
+        ]
+      },
+      {
+        "category": "device_serial",
+        "safe_harbor": "M",
+        "value": "(01)00312890044178(11)250101(21)SCN9931",
+        "spans": [
+          [
+            285,
+            324
+          ]
+        ]
+      },
+      {
+        "category": "ip_address",
+        "safe_harbor": "O",
+        "value": "198.51.100.22",
+        "spans": [
+          [
+            369,
+            382
+          ]
+        ]
+      },
+      {
+        "category": "url",
+        "safe_harbor": "N",
+        "value": "https://imaging.example-riverton.org/results/twhitlock66",
+        "spans": [
+          [
+            421,
+            477
+          ]
+        ]
+      },
+      {
+        "category": "email",
+        "safe_harbor": "F",
+        "value": "pramanathan@example.org",
+        "spans": [
+          [
+            701,
+            724
+          ]
+        ]
+      },
+      {
+        "category": "phone",
+        "safe_harbor": "D",
+        "value": "773-555-0121",
+        "spans": [
+          [
+            728,
+            740
+          ]
+        ]
+      }
+    ],
     "device_report_003.txt": [
       {
         "category": "name",

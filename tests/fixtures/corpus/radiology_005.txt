@@ -1,0 +1,24 @@
+RIVERTON IMAGING ASSOCIATES
+Radiology Report
+
+Patient Name: Terrence Whitlock
+Medical Record Number: MRN-6640933
+Accession Number: ACC-2025-88214
+Date of Service: 15 April 2025
+
+Ordering Provider: Dr. Priya Ramanathan
+NPI: 1740467307
+
+Equipment Serial Number: EQ-77120-B4
+Scanner UDI: (01)00312890044178(11)250101(21)SCN9931
+
+Images were reviewed on the workstation at 198.51.100.22 and released to the
+patient portal at https://imaging.example-riverton.org/results/twhitlock66 on
+the same day.
+
+Findings: No acute intracranial abnormality. Mild chronic small vessel changes,
+unchanged from the prior study. No mass effect or midline shift.
+
+Impression: Unremarkable study for age.
+
+Report questions: pramanathan@example.org or 773-555-0121.

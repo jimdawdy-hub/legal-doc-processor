@@ -331,12 +331,15 @@ def test_nothing_detected_above_the_floor_survives_in_the_output():
             text, pii._analyze_chunked(pii._get_engines()[0], text))
         scrubbed = pii.strip_pii(text, document.name, output_mode='rag').text
         for d in detections:
-            if d.score >= pii.LOW_CONFIDENCE:
-                original = text[d.start:d.end]
-                assert original not in scrubbed, (
-                    f"{document.name}: {d.entity_type} {original!r} scored "
-                    f"{d.score:.2f} and was still left in the output"
-                )
+            if d.score < pii.LOW_CONFIDENCE:
+                continue
+            original = text[d.start:d.end]
+            # Counted rather than searched: an ordinary word can appear
+            # elsewhere in the document and is not a survival of this span.
+            assert scrubbed.count(original) < text.count(original), (
+                f"{document.name}: {d.entity_type} {original!r} scored "
+                f"{d.score:.2f} and was still left in the output"
+            )
 
 
 def test_slip_opinion_still_gets_rag_output(tmp_dir):
