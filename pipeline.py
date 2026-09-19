@@ -1,9 +1,10 @@
-import json
 import re
 import shutil
+import uuid
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from multiprocessing import Lock
 from pathlib import Path
 from typing import Optional
@@ -12,9 +13,17 @@ from utils import anon_id, document_key, sha256_file, SUPPORTED_EXTENSIONS
 from reader import read_file
 from classifier import classify
 from cleaner import clean
-from pii import strip_pii, HIGH_CONFIDENCE, MISCLASSIFICATION_SIGNALS
+from pii import strip_pii, HIGH_CONFIDENCE, LOW_CONFIDENCE, MISCLASSIFICATION_SIGNALS
 from chunker import chunk
-from writer import write_rag_chunks, write_finetune_record
+from writer import (
+    open_batch,
+    records_root,
+    unaccepted_batches,
+    write_evidence_record,
+    write_finetune_record,
+    write_rag_chunks,
+    write_verification_record,
+)
 from provenance import ProvenanceManifest
 from reporter import generate_reports
 
@@ -171,7 +180,35 @@ def _quarantine_reason(doc_type: str, pii_result) -> Optional[str]:
     return None
 
 
-def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> ProcessResult:
+def _new_batch_id() -> str:
+    return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ-') + uuid.uuid4().hex[:8]
+
+
+def _record_redactions(path: Path, doc_type: str, pii_result, batch_id: str,
+                       output_dir: Path, skip_reason: Optional[str] = None) -> dict:
+    """Write both redaction records, outside the output directory (U8).
+
+    Per-document files following write_rag_chunks' shape, so no lock is needed
+    under --workers.
+    """
+    key = document_key(path)
+    label = anon_id(path)
+    evidence = write_evidence_record(
+        doc_key=key, anon_id=label, doc_type=doc_type,
+        detections=pii_result.detections, redaction_floor=LOW_CONFIDENCE,
+        source_filename=path.name, source_dir=str(path.parent.resolve()),
+        skip_reason=skip_reason,
+    )
+    write_verification_record(
+        doc_key=key, anon_id=label, batch_id=batch_id,
+        detections=pii_result.detections, redaction_floor=LOW_CONFIDENCE,
+    )
+    return evidence
+
+
+def process_file(path: Path, output_dir: Path, dry_run: bool = False,
+                 batch_id: Optional[str] = None) -> ProcessResult:
+    batch_id = batch_id or _new_batch_id()
     read_result = read_file(path)
 
     if read_result is None:
@@ -202,6 +239,11 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
     if hold_back:
         if not dry_run:
             _hold_back(path, output_dir, 'pii_queue')
+            # A held-back document still gets a record of what was found in it.
+            # Its reason for being held back is exactly what someone will want
+            # to look up later.
+            _record_redactions(path, doc_type, pii_result, batch_id, output_dir,
+                               skip_reason=hold_back)
         return ProcessResult(
             path=path, doc_type=doc_type,
             classification_confidence=classify_result.confidence,
@@ -216,20 +258,9 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
     chunks = chunk(text, doc_type)
     token_count = sum(c.token_count for c in chunks)
 
+    evidence = None
     if not dry_run:
-        if redacted and pii_result.review_flags:
-            review_log = output_dir / 'review' / 'review_log.jsonl'
-            review_log.parent.mkdir(parents=True, exist_ok=True)
-            lock = _get_write_lock()
-            if lock:
-                with lock:
-                    with open(review_log, 'a') as f:
-                        for flag in pii_result.review_flags:
-                            f.write(json.dumps(flag) + '\n')
-            else:
-                with open(review_log, 'a') as f:
-                    for flag in pii_result.review_flags:
-                        f.write(json.dumps(flag) + '\n')
+        evidence = _record_redactions(path, doc_type, pii_result, batch_id, output_dir)
 
         if doc_type in ('caselaw', 'published'):
             extra = _caselaw_meta(text) if doc_type == 'caselaw' else {}
@@ -245,7 +276,13 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
                 doc_type=doc_type,
                 pii_stripped=doc_type in ('private', 'uncertain'),
                 faker_substitutions=faker_subs,
+                # Unchanged in name and meaning: the count of *ambiguous*
+                # detections. re_id_risk.py sorts by it to choose which
+                # records get the paid adversarial review first, so
+                # redefining it as a total would silently invert that
+                # ordering with no visible error. The total goes beside it.
                 review_flags=flag_count,
+                total_redactions=evidence['total_redacted'] if redacted else 0,
                 token_count=token_count,
                 output_file=output_dir / 'finetune' / 'dataset.jsonl',
                 lock=_get_write_lock(),
@@ -265,8 +302,8 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
     )
 
 
-def process_file_safely(path: Path, output_dir: Path,
-                        dry_run: bool = False) -> ProcessResult:
+def process_file_safely(path: Path, output_dir: Path, dry_run: bool = False,
+                        batch_id: Optional[str] = None) -> ProcessResult:
     """process_file, but one bad document costs only that document.
 
     An unhandled exception used to propagate out of the loop, so the manifest
@@ -275,7 +312,7 @@ def process_file_safely(path: Path, output_dir: Path,
     closure because ProcessPoolExecutor has to pickle it.
     """
     try:
-        return process_file(path, output_dir, dry_run)
+        return process_file(path, output_dir, dry_run, batch_id)
     except Exception as exc:  # noqa: BLE001 - the whole point is to catch everything
         print(f"  ERROR  {path.name}: {type(exc).__name__}: {exc}")
         return ProcessResult(
@@ -334,6 +371,9 @@ def process_directory(
               f"{f' → use {Path(detail).name}' if detail else ''}")
     manifest = ProvenanceManifest(output_dir, sidecar_path,
                                   source_dir=input_dir) if not dry_run else None
+    batch_id = _new_batch_id()
+    if not dry_run:
+        open_batch(batch_id, output_dir)
     results = []
 
     if workers > 1:
@@ -341,13 +381,13 @@ def process_directory(
         with ProcessPoolExecutor(max_workers=workers,
                                   initializer=_init_write_lock,
                                   initargs=(lock,)) as ex:
-            futures = {ex.submit(process_file_safely, f, output_dir, dry_run): f
-                       for f in files}
+            futures = {ex.submit(process_file_safely, f, output_dir, dry_run,
+                                 batch_id): f for f in files}
             for fut in as_completed(futures):
                 results.append(fut.result())
     else:
         for f in files:
-            results.append(process_file_safely(f, output_dir, dry_run))
+            results.append(process_file_safely(f, output_dir, dry_run, batch_id))
 
     for r in results:
         _print_result(r, dry_run)
@@ -372,7 +412,21 @@ def process_directory(
         generate_reports(output_dir)
         print(f"\nReports written to {output_dir}/")
         print(f"  summary.html        — open in browser, print to PDF")
-        print(f"  review/review_log.csv — PII flags for spreadsheet review")
+        print(f"  review/review_log.csv — identifier types and counts")
+        print(f"\nRedaction records (outside the output directory):")
+        print(f"  {records_root()}/evidence/     — types, counts, locations; kept")
+        print(f"  {records_root()}/verification/{batch_id}/ — original values")
+        print(f"  Accept this batch to delete its original values:")
+        print(f"    python3.12 review_pii.py --accept {batch_id}")
+
+        stale = unaccepted_batches(exclude=batch_id)
+        if stale:
+            print(f"\n  {len(stale)} earlier batch(es) still hold original "
+                  f"identifier values and have not been accepted:")
+            for info in stale:
+                print(f"    {info['batch_id']}  "
+                      f"({info.get('record_count', 0)} documents, "
+                      f"opened {info.get('opened_at', 'unknown')})")
 
 
 def _print_result(r: ProcessResult, dry_run: bool) -> None:

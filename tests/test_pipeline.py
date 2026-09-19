@@ -99,16 +99,13 @@ def test_medical_record_with_published_lookalike_is_scrubbed(
     assert discharge_ids['ssn'] not in _read_deliverable_text(out_dir)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "R10, owned by U8: pii.py records a 60-character context window around "
-    "every medium-confidence detection, and pipeline.py writes it to "
-    "output/review/review_log.jsonl -- inside the directory that leaves the "
-    "machine. A window around a flagged ZIP routinely contains the SSN. U8 "
-    "moves the record out and strips original values and context excerpts; "
-    "this marker is strict so it fails the moment that lands."
-))
 def test_no_identifier_anywhere_in_the_output_directory(tmp_dir, discharge_text,
                                                         discharge_ids):
+    """R10. The output directory is the one thing that leaves the machine, so
+    it is the trust boundary. This used to fail: pii.py recorded a
+    sixty-character context window around every medium-confidence detection
+    and pipeline.py wrote it to output/review/review_log.jsonl -- and a window
+    around a flagged ZIP contains the SSN."""
     src = tmp_dir / "discharge_summary.txt"
     src.write_text(discharge_text('copyright'))
     out_dir = tmp_dir / "output"

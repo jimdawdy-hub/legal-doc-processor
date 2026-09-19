@@ -236,9 +236,13 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
             'action': 'redacted_pending_review',
         })
 
+    # 'value' is carried in memory so the verification record (R18) can be
+    # written from it. Only that record ever persists it -- the evidence record
+    # projects these entries to type, location and score, and nothing inside
+    # the output directory sees them at all (R10).
     detections = [
         {'entity_type': r.entity_type, 'start': r.start, 'end': r.end,
-         'score': round(r.score, 3)}
+         'score': round(r.score, 3), 'value': text[r.start:r.end]}
         for r in results
     ]
     unresolved_labels = find_unresolved_labels(text)
