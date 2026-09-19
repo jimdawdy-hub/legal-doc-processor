@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from utils import document_key, sha256_file
+from utils import document_key, sha256_file, HOLD_BACK_LABELS
 
 
 class ProvenanceManifest:
@@ -122,6 +122,14 @@ class ProvenanceManifest:
             'private_files': sum(1 for f in processed if f['doc_type'] == 'private'),
             'uncertain_files': sum(1 for f in processed if f['doc_type'] == 'uncertain'),
             'ocr_files': sum(1 for f in processed if f['processing']['ocr']),
+            # One counter per hold-back reason. This used to count only the
+            # OCR reason, so any other hold-back was invisible in the summary.
+            'held_back': {
+                reason: sum(1 for f in self._files if f.get('skip_reason') == reason)
+                for reason in HOLD_BACK_LABELS
+            },
+            # Kept under its original name for the OCR tile and for anything
+            # already reading it.
             'review_queue_files': sum(
                 1 for f in self._files if f.get('skip_reason') == 'ocr_confidence_low'
             ),

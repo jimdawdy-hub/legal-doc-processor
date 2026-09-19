@@ -10,7 +10,7 @@ from faker import Faker
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.chunkers import CharacterBasedTextChunker
 
-from recognizers import build_recognizers
+from recognizers import build_recognizers, find_unresolved_labels
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import ConflictResolutionStrategy, OperatorConfig
 
@@ -26,14 +26,39 @@ class PIIResult:
     text: str
     substitutions: int
     review_flags: List[dict] = field(default_factory=list)
+    # Structural facts only -- type, location and score, never the value.
+    # pipeline.py is the only place that holds both these and the document's
+    # classification, so it is the only place that can adjudicate KTD13's
+    # signal-versus-ambient question. Threading doc_type into this module for
+    # convenience would re-create the coupling KTD5 exists to remove.
+    detections: List[dict] = field(default_factory=list)
+    unresolved_labels: List[dict] = field(default_factory=list)
 
 
 HIGH_CONFIDENCE = 0.85
+
+# Entity types that never legitimately appear in published case law (KTD13).
+# Finding one in a document classified caselaw or published is evidence the
+# classifier was wrong, and is what triggers quarantine rather than redaction.
+# Everything else -- person, date, location and the rest -- is ambient: it
+# saturates legal text, and treating it as a signal would either quarantine
+# every real opinion or substitute fake names over judges and parties.
+MISCLASSIFICATION_SIGNALS = frozenset({
+    'US_SSN', 'MEDICAL_RECORD_NUMBER', 'MEDICAL_LICENSE', 'US_NPI', 'US_MBI',
+    'HEALTH_PLAN_ID', 'ACCOUNT_NUMBER', 'DEVICE_SERIAL',
+})
 MAX_PRESIDIO_CHARS = 900_000  # spaCy's default limit is 1M; stay safely under it
 # Overlap between analysis chunks. Must exceed the longest identifier format in
 # scope, or an identifier longer than the overlap can still straddle a cut.
 CHUNK_OVERLAP_CHARS = 512
-LOW_CONFIDENCE = 0.50
+# The redaction floor (KTD9). Lowered from 0.50: missing an identifier is the
+# expensive failure, because over-redaction costs a consistently substituted
+# fake value while under-redaction costs a disclosure. The measured score
+# distribution has a clean gap below this, so going lower admits only
+# duplicates of values already caught. U10 asserts a per-category precision
+# floor alongside recall, because the evidence that supports lowering it also
+# says downstream analysis collapses once precision does.
+LOW_CONFIDENCE = 0.30
 
 ENTITY_TYPES = [
     # Present since the first version.
@@ -211,8 +236,16 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
             'action': 'redacted_pending_review',
         })
 
+    detections = [
+        {'entity_type': r.entity_type, 'start': r.start, 'end': r.end,
+         'score': round(r.score, 3)}
+        for r in results
+    ]
+    unresolved_labels = find_unresolved_labels(text)
+
     if not to_redact:
-        return PIIResult(text=text, substitutions=0, review_flags=review_flags)
+        return PIIResult(text=text, substitutions=0, review_flags=review_flags,
+                         detections=detections, unresolved_labels=unresolved_labels)
 
     # KTD1/KTD2: the library resolves overlapping spans by trimming at the
     # boundary and clamps its splice buffer against re-consuming text. The
@@ -231,6 +264,8 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
         text=anonymized.text,
         substitutions=len(anonymized.items),
         review_flags=review_flags,
+        detections=detections,
+        unresolved_labels=unresolved_labels,
     )
 
 

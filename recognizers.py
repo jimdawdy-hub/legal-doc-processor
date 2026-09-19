@@ -154,6 +154,61 @@ class LabelAnchoredRecognizer(LocalRecognizer):
         ]
 
 
+def _unresolved_label_pattern() -> re.Pattern:
+    every_label = [
+        label for synonyms in LABEL_SYNONYMS.values() for label in synonyms
+    ]
+    alternation = '|'.join(
+        re.escape(label) for label in sorted(every_label, key=len, reverse=True)
+    )
+    return re.compile(
+        rf'\b(?P<label>(?:{alternation}))\b'
+        rf'\s*(?:number|no\.?|id|code|#)?'
+        rf'\s*[:#]'
+        rf'(?P<rest>[^\n]*)',
+        re.IGNORECASE,
+    )
+
+
+_UNRESOLVED_LABEL_RE = _unresolved_label_pattern()
+
+# What "no resolvable value" actually looks like: nothing at all, a ruled
+# blank, or a placeholder a human typed because they could not read it.
+#
+# Deliberately not "does not match an identifier pattern". That reading held
+# back a document whose device UDI was fully detected and redacted, because
+# the value happened to start with a bracket -- a false quarantine on a
+# document that was handled correctly.
+_NO_VALUE_RE = re.compile(
+    r'\A[\s_\-.*]*'
+    r'(?:n/?a|none|unknown|illegible|unreadable|pending|tbd|\[[^\]]*\])?'
+    r'[\s_\-.*]*\Z',
+    re.IGNORECASE,
+)
+
+
+def find_unresolved_labels(text: str) -> list:
+    """Recognised labels whose value could not be read (plan Q1).
+
+    A structural failure, not a low-confidence guess: the document says
+    'Medical Record Number:' and then nothing usable follows. Common in
+    scanned records, and the reason U7 holds a document back rather than
+    emitting it and hoping. Returns locations only -- never the text that
+    followed the label, which is exactly the material R10 keeps out of the
+    output directory.
+    """
+    unresolved = []
+    for match in _UNRESOLVED_LABEL_RE.finditer(text):
+        if not _NO_VALUE_RE.match(match.group('rest')):
+            continue
+        unresolved.append({
+            'label': match.group('label').lower(),
+            'start': match.start('label'),
+            'end': match.end('label'),
+        })
+    return unresolved
+
+
 def build_predefined_recognizers() -> list:
     """Presidio's own validated recognizers that its default registry omits.
 

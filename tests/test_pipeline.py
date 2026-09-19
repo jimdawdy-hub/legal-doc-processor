@@ -166,6 +166,180 @@ def test_caselaw_passes_through_unredacted(tmp_dir, caselaw_text):
         assert verbatim in written
 
 
+# --- U7: floor, quarantine, and surviving one bad file ------------------------
+
+def _deliverables(out_dir: Path) -> list:
+    return [p for sub in ('rag', 'finetune')
+            for p in (out_dir / sub).rglob('*') if p.is_file()] \
+        if out_dir.exists() else []
+
+
+def test_detection_at_the_floor_is_redacted(tmp_dir):
+    """KTD9 lowers the floor to 0.30. An MBI with no label beside it scores
+    exactly 0.30 -- presidio is honest that an MBI has no checksum -- so it
+    was detected and then discarded by the old 0.50 floor."""
+    import pii
+    text = "The card showed 1EG4TE5MK73 clearly.\n"
+    assert any(round(r.score, 2) == 0.30 for r in
+               pii._analyze_chunked(pii._get_engines()[0], text)), "fixture drifted"
+    result = pii.strip_pii(text, "card.txt", output_mode='rag')
+    assert "1EG4TE5MK73" not in result.text
+
+
+def test_label_with_no_resolvable_value_is_quarantined(tmp_dir):
+    """Plan Q1: quarantine on a structural failure -- a recognised label whose
+    value could not be read. Common in scanned records, and silence is the
+    failure mode this plan exists to remove."""
+    src = tmp_dir / "scanned_record.txt"
+    src.write_text(
+        "RIVERTON CLINIC\nIntake Form\n\n"
+        "Patient: Wanda Ferris\n"
+        "Medical Record Number: \n"
+        "Seen for follow-up.\n"
+    )
+    out_dir = tmp_dir / "output"
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.skipped is True
+    assert result.skip_reason == 'unresolved_identifier_label'
+    assert _deliverables(out_dir) == [], "a quarantined document still wrote output"
+    assert (out_dir / "review" / "pii_queue" / "scanned_record.txt").exists()
+
+
+def test_public_document_containing_a_signal_identifier_is_quarantined(tmp_dir):
+    """KTD13: an SSN never legitimately appears in published case law, so
+    finding one is evidence the classifier was wrong."""
+    src = tmp_dir / "handout.txt"
+    src.write_text(
+        "Chicago Bar Journal\nVol. 42, No. 3 - ISSN 0009-3157\n"
+        "Continuing Legal Education\n\n"
+        "Social Security Number: 412-55-9083\n"
+    )
+    out_dir = tmp_dir / "output"
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.doc_type == 'published'
+    assert result.skipped is True
+    assert result.skip_reason == 'pii_in_public_document'
+    assert _deliverables(out_dir) == []
+
+
+def test_opinion_with_only_ambient_hits_is_not_quarantined(tmp_dir, caselaw_text):
+    """The other half of KTD13. Person, date and location saturate legal text:
+    a genuine opinion must pass through untouched, or unconditional detection
+    destroys the corpus the tool was built to produce."""
+    src = tmp_dir / "smith_v_jones.txt"
+    src.write_text(caselaw_text)
+    out_dir = tmp_dir / "output"
+
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.skipped is False
+    assert result.pii_stripped is False
+    assert (out_dir / "rag").exists()
+
+
+def test_ordinary_medium_confidence_detections_do_not_quarantine(tmp_dir):
+    """The common case has to keep flowing. Quarantining on any ambiguous
+    detection would hold back most of a real batch."""
+    src = tmp_dir / "note.txt"
+    src.write_text(
+        "RIVERTON FAMILY MEDICINE\nOffice Visit Note\n\n"
+        "Patient: Wanda Ferris\nSeen 09/11/2025 in the Riverton clinic.\n"
+        "Follow-up with Dr. Marcus Oyelaran in two weeks.\n"
+    )
+    out_dir = tmp_dir / "output"
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.skipped is False
+    assert result.pii_stripped is True
+
+
+def test_one_corrupt_file_does_not_cost_the_batch_its_manifest(tmp_dir):
+    inp, out_dir = tmp_dir / "input", tmp_dir / "output"
+    inp.mkdir(parents=True)
+    (inp / "good.txt").write_text("A routine clinic note about a follow-up visit.\n")
+    # Passes the extension check and then fails on read.
+    (inp / "broken.docx").write_bytes(b"this is not a docx at all")
+
+    process_directory(inp, out_dir, dry_run=False)
+
+    manifest = json.loads((out_dir / "provenance.json").read_text())
+    reasons = {f['skip_reason'] for f in manifest['files'] if f['skipped']}
+    assert 'processing_error' in reasons, (
+        f"the corrupt file did not report as an error: {reasons}"
+    )
+    assert (out_dir / "summary.html").exists(), "the run lost its report"
+
+
+def test_one_corrupt_file_does_not_abort_a_parallel_batch(tmp_dir):
+    inp, out_dir = tmp_dir / "input", tmp_dir / "output"
+    inp.mkdir(parents=True)
+    for i in range(3):
+        (inp / f"good_{i}.txt").write_text(f"A routine clinic note number {i}.\n")
+    (inp / "broken.docx").write_bytes(b"this is not a docx at all")
+
+    process_directory(inp, out_dir, dry_run=False, workers=2)
+
+    manifest = json.loads((out_dir / "provenance.json").read_text())
+    assert manifest['summary']['total_files'] == 4
+    assert manifest['summary']['processed_files'] == 3
+
+
+def test_hold_backs_are_reported_separately_by_reason(tmp_dir):
+    inp, out_dir = tmp_dir / "input", tmp_dir / "output"
+    inp.mkdir(parents=True)
+    (inp / "broken.docx").write_bytes(b"not a docx")
+    (inp / "unreadable.txt").write_text(
+        "Intake Form\nPatient: Wanda Ferris\nMedical Record Number: \nSeen today.\n"
+    )
+    process_directory(inp, out_dir, dry_run=False)
+
+    summary = json.loads((out_dir / "provenance.json").read_text())['summary']
+    assert summary['held_back']['processing_error'] == 1
+    assert summary['held_back']['unresolved_identifier_label'] == 1
+
+    html = (out_dir / "summary.html").read_text()
+    from utils import HOLD_BACK_LABELS
+    for reason in ('processing_error', 'unresolved_identifier_label'):
+        assert HOLD_BACK_LABELS[reason] in html, f"{reason} has no label in the report"
+    assert 'OCR queue (low confidence)' in html, "the OCR label was lost"
+
+
+def test_dry_run_reports_a_quarantine_and_writes_nothing(tmp_dir, capsys):
+    src = tmp_dir / "scanned_record.txt"
+    src.write_text("Intake Form\nMedical Record Number: \nSeen today.\n")
+    out_dir = tmp_dir / "output"
+
+    result = process_file(src, out_dir, dry_run=True)
+
+    assert result.skipped is True
+    assert result.skip_reason == 'unresolved_identifier_label'
+    assert not out_dir.exists(), "a dry run wrote to the output directory"
+
+
+def test_nothing_detected_above_the_floor_survives_in_the_output():
+    """KTD9's ordering note: containment resolution runs before score
+    thresholding, so a high-scoring span can absorb a contained weaker one and
+    then itself be dropped. Whatever the ordering, anything the tool detected
+    at or above the floor must not still be in the text."""
+    import pii
+    from pathlib import Path as _Path
+    corpus = _Path(__file__).parent / 'fixtures' / 'corpus'
+    for document in sorted(corpus.glob('*.txt')):
+        text = document.read_text()
+        detections = pii._clamp_over_long_spans(
+            text, pii._analyze_chunked(pii._get_engines()[0], text))
+        scrubbed = pii.strip_pii(text, document.name, output_mode='rag').text
+        for d in detections:
+            if d.score >= pii.LOW_CONFIDENCE:
+                original = text[d.start:d.end]
+                assert original not in scrubbed, (
+                    f"{document.name}: {d.entity_type} {original!r} scored "
+                    f"{d.score:.2f} and was still left in the output"
+                )
+
+
 def test_slip_opinion_still_gets_rag_output(tmp_dir):
     """A court opinion whose only caselaw signal is the OPINION/AFFIRMED keyword
     must stay caselaw -- 'uncertain' would scrub it and drop it from the corpus."""

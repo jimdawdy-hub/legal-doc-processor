@@ -144,19 +144,37 @@ def test_scorer_reports_a_number_for_every_category(baseline, capsys):
 
 def test_removing_a_recognizer_drops_that_categorys_recall(baseline, monkeypatch):
     """Proves the instrument can fail before anything depends on it. A scorer
-    that cannot register a regression is not measuring anything."""
-    assert baseline['recall'].get('ssn', 0) > 0, (
-        "precondition: SSN must be detected at baseline for this test to mean anything"
+    that cannot register a regression is not measuring anything.
+
+    URL rather than SSN because URL is the only recognizer covering that
+    category. An SSN is covered twice over -- see the test below -- so removing
+    one of the two proves nothing about the scorer.
+    """
+    assert baseline['recall'].get('url', 0) == 1.0, (
+        "precondition: URL must be detected at baseline for this test to mean anything"
     )
+    monkeypatch.setattr(
+        pii_module, 'ENTITY_TYPES',
+        [e for e in pii_module.ENTITY_TYPES if e != 'URL'],
+    )
+    degraded = score_corpus()
+    assert degraded['recall']['url'] < baseline['recall']['url'], (
+        "removing the URL recognizer did not reduce URL recall -- the scorer is "
+        "not bound to the tool's actual detections"
+    )
+
+def test_an_ssn_is_covered_by_more_than_one_recognizer(monkeypatch):
+    """Defence in depth, and only true since the floor dropped to 0.30: with
+    the dedicated SSN recognizer removed, the labelled value is still caught by
+    UNRESOLVED_IDENTIFIER at 0.40. Pinned because it is the difference between
+    one recognizer regressing and an identifier being disclosed."""
     monkeypatch.setattr(
         pii_module, 'ENTITY_TYPES',
         [e for e in pii_module.ENTITY_TYPES if e != 'US_SSN'],
     )
-    degraded = score_corpus()
-    assert degraded['recall']['ssn'] < baseline['recall']['ssn'], (
-        "removing the SSN recognizer did not reduce SSN recall -- the scorer is "
-        "not bound to the tool's actual detections"
-    )
+    result = strip_pii("Social Security Number: 412-55-9083\n", "note.txt",
+                       output_mode='rag')
+    assert "412-55-9083" not in result.text
 
 def test_no_leak_check_is_bound_to_ground_truth_not_to_the_tool(baseline):
     """The survivors list must come from the corpus manifest. Checking the

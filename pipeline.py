@@ -12,7 +12,7 @@ from utils import anon_id, document_key, sha256_file, SUPPORTED_EXTENSIONS
 from reader import read_file
 from classifier import classify
 from cleaner import clean
-from pii import strip_pii
+from pii import strip_pii, HIGH_CONFIDENCE, MISCLASSIFICATION_SIGNALS
 from chunker import chunk
 from writer import write_rag_chunks, write_finetune_record
 from provenance import ProvenanceManifest
@@ -134,14 +134,49 @@ class ProcessResult:
     skip_reason: Optional[str] = None
 
 
+def _hold_back(path: Path, output_dir: Path, queue: str) -> None:
+    """Copy a document aside instead of emitting it (KTD11).
+
+    A held-back document cannot reach a vendor by accident; a flag on an
+    emitted one relies on someone reading it.
+    """
+    destination = output_dir / 'review' / queue
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, destination / path.name)
+
+
+def _quarantine_reason(doc_type: str, pii_result) -> Optional[str]:
+    """Whether this document must be held back, and why.
+
+    This adjudication lives here because pipeline.py is the only place holding
+    both the detection facts and the classification. pii.py never receives
+    doc_type (KTD5).
+    """
+    if pii_result.unresolved_labels:
+        # Plan Q1: a recognised label with no resolvable value after it. A
+        # structural failure, not a low-confidence guess -- the document says
+        # it carries an identifier and we could not read it.
+        return 'unresolved_identifier_label'
+
+    if doc_type in ('caselaw', 'published'):
+        # KTD13: a confident healthcare identifier in a document classified
+        # public is evidence the classifier was wrong. Ambient types -- person,
+        # date, location -- never trigger this, or every real opinion would be
+        # held back.
+        for detection in pii_result.detections:
+            if (detection['entity_type'] in MISCLASSIFICATION_SIGNALS
+                    and detection['score'] >= HIGH_CONFIDENCE):
+                return 'pii_in_public_document'
+
+    return None
+
+
 def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> ProcessResult:
     read_result = read_file(path)
 
     if read_result is None:
         if not dry_run:
-            ocr_q = output_dir / 'review' / 'ocr_queue'
-            ocr_q.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, ocr_q / path.name)
+            _hold_back(path, output_dir, 'ocr_queue')
         return ProcessResult(
             path=path, doc_type='unknown', classification_confidence=0.0,
             ocr=True, ocr_confidence=None, pii_stripped=False,
@@ -162,6 +197,19 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
     redacted = doc_type in ('private', 'uncertain')
     if redacted:
         text = pii_result.text
+
+    hold_back = _quarantine_reason(doc_type, pii_result)
+    if hold_back:
+        if not dry_run:
+            _hold_back(path, output_dir, 'pii_queue')
+        return ProcessResult(
+            path=path, doc_type=doc_type,
+            classification_confidence=classify_result.confidence,
+            ocr=read_result.ocr, ocr_confidence=read_result.ocr_confidence,
+            pii_stripped=False, faker_substitutions=0, review_flags=0,
+            chunk_count=0, token_count=0,
+            skipped=True, skip_reason=hold_back,
+        )
 
     faker_subs = pii_result.substitutions if redacted else 0
     flag_count = len(pii_result.review_flags) if redacted else 0
@@ -215,6 +263,27 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
         chunk_count=len(chunks),
         token_count=token_count,
     )
+
+
+def process_file_safely(path: Path, output_dir: Path,
+                        dry_run: bool = False) -> ProcessResult:
+    """process_file, but one bad document costs only that document.
+
+    An unhandled exception used to propagate out of the loop, so the manifest
+    and the report were never written at all: a long unattended run could fail
+    wholesale and leave no record saying so. Module level rather than a nested
+    closure because ProcessPoolExecutor has to pickle it.
+    """
+    try:
+        return process_file(path, output_dir, dry_run)
+    except Exception as exc:  # noqa: BLE001 - the whole point is to catch everything
+        print(f"  ERROR  {path.name}: {type(exc).__name__}: {exc}")
+        return ProcessResult(
+            path=path, doc_type='unknown', classification_confidence=0.0,
+            ocr=False, ocr_confidence=None, pii_stripped=False,
+            faker_substitutions=0, review_flags=0, chunk_count=0, token_count=0,
+            skipped=True, skip_reason='processing_error',
+        )
 
 
 def _caselaw_meta(text: str) -> dict:
@@ -272,12 +341,13 @@ def process_directory(
         with ProcessPoolExecutor(max_workers=workers,
                                   initializer=_init_write_lock,
                                   initargs=(lock,)) as ex:
-            futures = {ex.submit(process_file, f, output_dir, dry_run): f for f in files}
+            futures = {ex.submit(process_file_safely, f, output_dir, dry_run): f
+                       for f in files}
             for fut in as_completed(futures):
                 results.append(fut.result())
     else:
         for f in files:
-            results.append(process_file(f, output_dir, dry_run))
+            results.append(process_file_safely(f, output_dir, dry_run))
 
     for r in results:
         _print_result(r, dry_run)

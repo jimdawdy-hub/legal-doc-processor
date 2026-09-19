@@ -62,6 +62,27 @@ def test_the_label_itself_survives_redaction():
     assert "4417392" not in result.text
 
 
+@pytest.mark.parametrize('line,unresolved', [
+    ("Medical Record Number: \n", True),
+    ("MRN: N/A\n", True),
+    ("Patient ID: [illegible]\n", True),
+    ("Chart Number: ______\n", True),
+    ("Medical Record Number: 4417392\n", False),
+    ("Account Number: 88-4410-22\n", False),
+    # Not an identifier pattern, but a value is plainly there. Treating
+    # "does not look like an identifier" as unresolved held back a document
+    # whose device UDI was fully detected, because it started with a bracket.
+    ("Group: A\n", False),
+    ("Device UDI: (01)00819320041234(17)270630(10)LOT4471\n", False),
+])
+def test_unresolved_label_detection(line, unresolved):
+    """Plan Q1's quarantine trigger is a structural failure -- the document
+    says it carries an identifier and no value follows -- not a
+    low-confidence guess."""
+    found = recognizers.find_unresolved_labels(line)
+    assert bool(found) is unresolved, f"{line!r} -> {found}"
+
+
 def test_unrecognised_label_with_a_digit_run_is_not_silent():
     """Plan Q2: a label-like token followed by a value that no synonym list
     claims must still surface. Silence is the failure mode being removed.

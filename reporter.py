@@ -10,6 +10,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from utils import HOLD_BACK_LABELS
+
 
 def generate_reports(output_dir: Path) -> None:
     review_dir = output_dir / 'review'
@@ -66,6 +68,18 @@ def _write_html(flags: list, provenance: dict, out_path: Path) -> None:
     files = provenance.get('files', [])
     dataset_name = _esc(provenance.get('dataset_name') or 'Legal Document Dataset')
     generated = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    # One tile per hold-back reason, always rendered so a zero is visible as a
+    # zero. The OCR reason used to be the only one with a counter or a label,
+    # which would have made every hold-back U7 adds invisible here.
+    held_back = summary.get('held_back') or {
+        'ocr_confidence_low': summary.get('review_queue_files', 0)
+    }
+    hold_back_tiles = '\n  '.join(
+        f'<div class="stat"><div class="val">{held_back.get(reason, 0)}</div>'
+        f'<div class="lbl">{_esc(label)}</div></div>'
+        for reason, label in HOLD_BACK_LABELS.items()
+    )
 
     by_type = Counter(f['entity_type'] for f in flags)
     by_file = defaultdict(list)
@@ -206,7 +220,7 @@ def _write_html(flags: list, provenance: dict, out_path: Path) -> None:
   <div class="stat"><div class="val">{summary.get('total_files',0)}</div><div class="lbl">Files processed</div></div>
   <div class="stat"><div class="val">{summary.get('total_tokens',0):,}</div><div class="lbl">Total tokens</div></div>
   <div class="stat"><div class="val">{summary.get('pii_review_flags',0):,}</div><div class="lbl">PII flags for review</div></div>
-  <div class="stat"><div class="val">{summary.get('review_queue_files',0)}</div><div class="lbl">OCR queue (low confidence)</div></div>
+  {hold_back_tiles}
 </div>
 <div class="stat-grid">
   <div class="stat"><div class="val">{summary.get('caselaw_files',0)}</div><div class="lbl">Case law → RAG</div></div>

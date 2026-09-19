@@ -3,6 +3,17 @@ from pathlib import Path
 
 SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.eml', '.msg', '.txt'}
 
+# Why a document was held back instead of emitted, and how to name it to a
+# human. Kept in one place because the provenance summary used to count only
+# the OCR reason and the report used to label that one tile "OCR queue (low
+# confidence)" -- so any new hold-back would have been invisible in both.
+HOLD_BACK_LABELS = {
+    'ocr_confidence_low': 'OCR queue (low confidence)',
+    'unresolved_identifier_label': 'Held back (unreadable identifier)',
+    'pii_in_public_document': 'Held back (identifiers in a public document)',
+    'processing_error': 'Held back (processing error)',
+}
+
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
