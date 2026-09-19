@@ -60,10 +60,20 @@ output/
 ├── rag/                    ← chunked JSONL for case law + published docs
 ├── finetune/dataset.jsonl  ← full-doc JSONL for private + published docs
 ├── review/
-│   ├── review_log.jsonl    ← PII entities flagged for human review
-│   └── ocr_queue/          ← PDFs with OCR confidence below 70%
+│   ├── review_log.csv      ← identifier types and counts (no values)
+│   ├── ocr_queue/          ← PDFs with OCR confidence below 70%
+│   └── pii_queue/          ← documents held back rather than emitted
+├── summary.html            ← read-only run report
 └── provenance.json         ← dataset manifest (fill in dataset-level fields)
 ```
+
+Nothing in `output/` carries an identifier value, a context excerpt or a
+source filename — documents appear there only under an anonymous id. The
+redaction records live outside it, under
+`~/.local/share/legal-doc-processor/` (override with `LEGAL_DOC_RECORDS_DIR`):
+a durable `evidence/` record with types, counts and locations but no values,
+and a `verification/<batch_id>/` record holding the values, which is deleted
+when the batch is accepted.
 
 ## Document Type → Pipeline
 
@@ -85,9 +95,10 @@ surprising assignments before processing.
 1. Open `output/provenance.json` and fill in the dataset-level fields:
    `dataset_name`, `created_by`, `source_collection`, `license`,
    `jurisdiction_coverage`.
-2. Review `output/review/review_log.jsonl` — each entry is a PII entity
-   the pipeline wasn't certain about. Verify and remove records from
-   the finetune dataset if needed.
+2. Check `output/review/pii_queue/` for documents held back — either a
+   recognised label with no readable value, or a healthcare identifier in a
+   document classified as case law or published. Fix and re-run; re-runs
+   replace rather than duplicate.
 3. Check `output/review/ocr_queue/` for any PDFs that couldn't be OCR'd
    reliably (mean word confidence < 70%). These need manual handling.
 4. Run re-identification risk assessment + second-pass redaction (optional, uses Claude API):
@@ -107,23 +118,28 @@ surprising assignments before processing.
    `--apply` automatically runs `second_pass.py` after assessment and patches all JSONL files.
    Requires `ANTHROPIC_API_KEY` in the environment.
 
-## Interactive Review
+## Review
+
+No per-document approval step. Review a finished batch, then accept it —
+accepting is what deletes the original values.
 
 ```bash
-# Start browser-based review server (replaces manual CSV handling)
-python3.12 review_server.py --output /path/to/output
-
-# OR: apply a decisions CSV directly from the command line
-python3.12 apply_decisions.py --decisions decisions.csv --output /path/to/output --reviewer "Your Name"
+python3.12 review_pii.py --list                       # batches holding values
+python3.12 review_pii.py --batch <id> --summary       # counts by type/document
+python3.12 review_pii.py --batch <id> --type US_SSN   # the values themselves
+python3.12 review_pii.py --accept <id>                # delete the values
 ```
+
+A CSV export from this tool carries original values and refuses to write
+inside an output directory.
 
 ## PII Confidence Thresholds
 
 | Presidio score | Action |
 |---|---|
-| ≥ 0.85 | Auto-redact; replace with Faker synthetic value |
-| 0.50–0.84 | Redact + write to review_log.jsonl for sign-off |
-| < 0.50 | Leave in place |
+| ≥ 0.85 | Redact; replace with a type-correct synthetic value |
+| 0.30–0.84 | Redact, and count as an ambiguous detection |
+| < 0.30 | Leave in place, but still recorded |
 
 ## Running Tests
 

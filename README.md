@@ -106,13 +106,41 @@ The most common failure modes the red-team catches:
 output/
 ├── rag/                      ← one JSONL per source document, one record per chunk
 ├── finetune/
-│   └── dataset.jsonl         ← one record per document (appended across all runs)
+│   └── dataset.jsonl         ← one record per document, replaced on re-run
 ├── review/
-│   ├── review_log.jsonl      ← PII entities scored 0.50–0.84 (human sign-off needed)
-│   └── ocr_queue/            ← scanned PDFs where OCR confidence fell below 70%
+│   ├── review_log.csv        ← identifier types and counts (no values)
+│   ├── ocr_queue/            ← scanned PDFs where OCR confidence fell below 70%
+│   └── pii_queue/            ← documents held back rather than emitted
 ├── re_id_risk_report.json    ← per-record red-team assessments + overall risk summary
-├── summary.html              ← interactive report (PII flags, decisions, risk table)
+├── summary.html              ← read-only run report
 └── provenance.json           ← dataset manifest with full audit trail
+```
+
+**Nothing in this directory carries an identifier value, a context excerpt, or
+a source filename.** It is the one thing that leaves the machine, so it is the
+trust boundary. Documents appear there only under an anonymous id.
+
+The redaction records live **outside** it, under
+`~/.local/share/legal-doc-processor/` (override with `LEGAL_DOC_RECORDS_DIR`),
+as two artifacts with different lifetimes:
+
+```
+evidence/<doc_key>.json                  ← identifier types, counts, locations,
+                                            the id→filename mapping. No values.
+                                            Kept indefinitely; losing it
+                                            discloses nothing.
+verification/<batch_id>/<doc_key>.json   ← the original values, so a human can
+                                            check the batch. Deleted when the
+                                            batch is accepted.
+```
+
+Directories are `0700` and files `0600`. Accept a batch once you have checked
+it — that is what deletes the values:
+
+```bash
+python3.12 review_pii.py --list                  # batches still holding values
+python3.12 review_pii.py --batch <id> --summary  # what was found
+python3.12 review_pii.py --accept <id>           # delete the values
 ```
 
 ### RAG chunk record
@@ -169,13 +197,45 @@ Detection uses [Microsoft Presidio](https://github.com/microsoft/presidio) with 
 
 | Presidio confidence | Action |
 |---|---|
-| ≥ 0.85 | Auto-redact; replace with Faker synthetic value |
-| 0.50 – 0.84 | Redact + write to `review_log.jsonl` for human sign-off |
-| < 0.50 | Leave in place |
+| ≥ 0.85 | Redact; replace with a type-correct synthetic value |
+| 0.30 – 0.84 | Redact, and count as an ambiguous detection in the record |
+| < 0.30 | Leave in place, but still recorded |
+
+The floor is 0.30 rather than 0.50 because missing an identifier is the
+expensive failure: over-redaction costs a consistently substituted fake value,
+under-redaction costs a disclosure.
 
 Faker replacements are **consistent within a document** — the same detected entity always maps to the same synthetic value, preserving co-reference coherence in the training data. Date shifts are format-preserving and consistent per document (180–730 day offset seeded by content hash), so temporal relationships between dates are preserved.
 
-Entity types detected: `PERSON`, `PHONE_NUMBER`, `EMAIL_ADDRESS`, `LOCATION`, `US_SSN`, `DATE_TIME` (birthdate context), `US_BANK_NUMBER`, `CREDIT_CARD`, `US_PASSPORT`, `US_DRIVER_LICENSE`, `IP_ADDRESS`, `MEDICAL_LICENSE`
+Entity types detected: `PERSON`, `PHONE_NUMBER`, `EMAIL_ADDRESS`, `LOCATION`,
+`US_SSN`, `DATE_TIME`, `US_BANK_NUMBER`, `CREDIT_CARD`, `US_PASSPORT`,
+`US_DRIVER_LICENSE`, `IP_ADDRESS`, `MEDICAL_LICENSE` (DEA), `US_NPI`,
+`US_MBI`, `URL`, `STREET_ADDRESS`, `US_ZIP`, `AGE_OVER_89`,
+`MEDICAL_RECORD_NUMBER`, `HEALTH_PLAN_ID`, `ACCOUNT_NUMBER`, `DEVICE_SERIAL`,
+`VEHICLE_ID`, `OTHER_IDENTIFIER`, `UNRESOLVED_IDENTIFIER`.
+
+Together these cover the sixteen HIPAA Safe Harbor identifier categories that
+can appear in extracted text — the eighteen at 45 CFR §164.514(b)(2) less
+full-face photographs and biometric identifiers, neither of which can.
+
+**This is not a claim of Safe Harbor compliance.** Dates are shifted by a
+consistent per-document offset to preserve clinical intervals, which is an
+Expert Determination technique, not a Safe Harbor one — Safe Harbor requires
+dates truncated to the year. Ages over 89 are aggregated to "90 or older".
+
+### Documents held back
+
+A document the scrubber cannot clean confidently is copied to
+`output/review/pii_queue/` and no deliverable is written for it. Two triggers:
+
+- **a recognised label with no readable value** — the document says "Medical
+  Record Number:" and nothing follows it. Common on scans.
+- **a healthcare identifier in a document classified as case law or
+  published** — an SSN or medical record number does not belong in a published
+  opinion, so finding one is evidence the document was classified wrongly.
+
+Person, date and location never trigger it: those saturate legal text, and
+treating them as a signal would hold back every real opinion.
 
 ## Classification Signals
 
@@ -193,26 +253,37 @@ Rule-based, no ML model required. Scored against the first 5,000 characters of e
 - `ATTORNEYS FOR`, `LAW DIVISION` → private
 - `PLAINTIFF`, `DEFENDANT` → private
 
-## Interactive Review
+## Review
 
-After each pipeline run, `summary.html` opens in any browser. From there you can review every flagged PII entity, batch-approve or restore by file or entity type, and submit decisions directly to the local review server.
+There is no per-document approval step. The run completes on its own and
+writes a record of every redaction; review is something you do to a finished
+batch, not a gate the pipeline waits on.
+
+`summary.html` is a static, read-only report — identifier types, counts and
+locations, and never the identifiers themselves. It opens in any browser with
+nothing running.
+
+To check the values themselves, use the verification record:
 
 ```bash
-# Start local review server (browser opens automatically)
-python3.12 review_server.py --output /path/to/output
-
-# OR apply a decisions CSV from the command line
-python3.12 apply_decisions.py --decisions decisions.csv --output /path/to/output --reviewer "Your Name"
+python3.12 review_pii.py --list                       # batches holding values
+python3.12 review_pii.py --batch <id> --summary       # counts by type/document
+python3.12 review_pii.py --batch <id> --type US_SSN   # the values themselves
+python3.12 review_pii.py --batch <id> --csv ~/check.csv
+python3.12 review_pii.py --accept <id>                # delete the values
 ```
 
-The review server writes an audit entry to `provenance.json` and archives each decisions file to `source_dir/audit/` for the chain-of-custody record.
+A CSV export from this tool carries original values, so it refuses to write
+anywhere inside an output directory. A batch left unaccepted is named on the
+next run rather than quietly aged out.
 
 ## After Running
 
 1. Fill in `output/provenance.json` dataset-level fields: `dataset_name`, `created_by`, `source_collection`, `license`, `jurisdiction_coverage`
-2. Review `output/review/review_log.jsonl` — verify each flagged PII entity
+2. Check `output/review/pii_queue/` for documents held back, fix them, and re-run — re-runs replace rather than duplicate
 3. Check `output/review/ocr_queue/` for PDFs needing manual OCR handling
 4. Run the AI red-team verification: `ANTHROPIC_API_KEY=... python3.12 re_id_risk.py --output /path/to/output --apply`
+5. Check the batch with `review_pii.py` and **accept it**, which deletes the original values
 
 ## File Structure
 
@@ -223,19 +294,18 @@ legal-doc-processor/
 ├── reader.py           ← PDF/DOCX/PPTX/EML/MSG/TXT → ReadResult
 ├── classifier.py       ← text + path → ClassifyResult (doc_type, confidence)
 ├── cleaner.py          ← strip headers, line numbers, Westlaw annotations
-├── pii.py              ← Presidio detection + Faker replacement + review log
+├── pii.py              ← Presidio detection, replacement, thresholds, seeding
+├── recognizers.py      ← recognizer definitions for identifiers presidio omits
 ├── chunker.py          ← token-aware chunking via langchain-text-splitters
-├── writer.py           ← RAG JSONL + finetune JSONL writers
+├── writer.py           ← RAG + finetune writers, and the redaction records
 ├── provenance.py       ← ProvenanceManifest with sidecar CSV support
 ├── reporter.py         ← generates summary.html + review_log.csv
-├── review_server.py    ← local HTTP server for in-browser PII review
-├── apply_decisions.py  ← apply decisions CSV, write audit entry
-├── review_pii.py       ← standalone CLI for reviewing PII flags
+├── review_pii.py       ← read the verification record; accept a batch
 ├── re_id_risk.py       ← AI red-team: adversarial re-identification assessment
 ├── second_pass.py      ← targeted second-pass redaction from red-team findings
 ├── SKILL.md            ← OpenClaw agent instructions
 ├── requirements.txt
-└── tests/              ← 56 tests, pytest
+└── tests/              ← pytest
 ```
 
 ## Running Tests
@@ -260,7 +330,7 @@ python3.12 -m pytest tests/ -v
 
 **The user is solely responsible for verifying that all output documents are free of PII before use.** This includes, but is not limited to:
 
-- Manually reviewing all flagged entities in `review_log.jsonl` and the interactive `summary.html` report
+- Reviewing the batch's verification record with `review_pii.py` before accepting it, and reading the `summary.html` report
 - Running the AI red-team verification pass (`re_id_risk.py`) and reviewing its findings
 - Checking `re_id_risk_report.json` for any `HIGH` or `CRITICAL` risk records and acting on the recommendations
 - Inspecting the OCR queue for documents that bypassed automated processing
