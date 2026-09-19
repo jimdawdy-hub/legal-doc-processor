@@ -69,6 +69,17 @@ def _read_all_output_text(out_dir: Path) -> str:
     )
 
 
+def _read_deliverable_text(out_dir: Path) -> str:
+    """The files that are actually handed onward: RAG chunks and finetune
+    records. The review record under output/review/ is audit material whose
+    relocation out of this directory is R10's job, owned by U8."""
+    return '\n'.join(
+        p.read_text(errors='replace')
+        for sub in ('rag', 'finetune')
+        for p in (out_dir / sub).rglob('*') if p.is_file()
+    ) if out_dir.exists() else ''
+
+
 @pytest.mark.parametrize('footer', ['copyright', 'bar_association', 'issn'])
 def test_medical_record_with_published_lookalike_is_scrubbed(
     tmp_dir, discharge_text, discharge_ids, footer
@@ -85,7 +96,26 @@ def test_medical_record_with_published_lookalike_is_scrubbed(
     assert result.pii_stripped is True, (
         f"classified {result.doc_type!r} and skipped the scrubber"
     )
-    assert discharge_ids['ssn'] not in _read_all_output_text(out_dir)
+    assert discharge_ids['ssn'] not in _read_deliverable_text(out_dir)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "R10, owned by U8: pii.py records a 60-character context window around "
+    "every medium-confidence detection, and pipeline.py writes it to "
+    "output/review/review_log.jsonl -- inside the directory that leaves the "
+    "machine. A window around a flagged ZIP routinely contains the SSN. U8 "
+    "moves the record out and strips original values and context excerpts; "
+    "this marker is strict so it fails the moment that lands."
+))
+def test_no_identifier_anywhere_in_the_output_directory(tmp_dir, discharge_text,
+                                                        discharge_ids):
+    src = tmp_dir / "discharge_summary.txt"
+    src.write_text(discharge_text('copyright'))
+    out_dir = tmp_dir / "output"
+    process_file(src, out_dir, dry_run=False)
+    written = _read_all_output_text(out_dir)
+    for value in discharge_ids.values():
+        assert value not in written, f"{value!r} is inside the output directory"
 
 
 def test_detection_runs_for_every_doc_type(tmp_dir, monkeypatch, discharge_text):

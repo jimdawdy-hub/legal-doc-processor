@@ -7,8 +7,10 @@ from typing import List, Optional
 from utils import sha256_file
 
 from faker import Faker
-from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
+from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.chunkers import CharacterBasedTextChunker
+
+from recognizers import build_recognizers
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import ConflictResolutionStrategy, OperatorConfig
 
@@ -34,9 +36,17 @@ CHUNK_OVERLAP_CHARS = 512
 LOW_CONFIDENCE = 0.50
 
 ENTITY_TYPES = [
+    # Present since the first version.
     "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "LOCATION",
     "US_SSN", "DATE_TIME", "US_BANK_NUMBER", "CREDIT_CARD",
     "US_PASSPORT", "US_DRIVER_LICENSE", "IP_ADDRESS", "MEDICAL_LICENSE",
+    # Safe Harbor categories the detector used to ignore (U5).
+    "URL", "STREET_ADDRESS", "US_ZIP", "AGE_OVER_89",
+    "MEDICAL_RECORD_NUMBER", "HEALTH_PLAN_ID", "ACCOUNT_NUMBER",
+    "DEVICE_SERIAL", "VEHICLE_ID", "OTHER_IDENTIFIER",
+    # A labelled value no specific recognizer above claimed. Never silent:
+    # this is the signal that a label was understood and its value was not.
+    "UNRESOLVED_IDENTIFIER",
 ]
 
 _analyzer: Optional[AnalyzerEngine] = None
@@ -164,13 +174,8 @@ def _get_engines():
     global _analyzer, _anonymizer
     if _analyzer is None:
         _analyzer = AnalyzerEngine()
-        # Supplement built-in US_SSN with an explicit high-confidence pattern recognizer
-        # so NNN-NN-NNNN is always caught regardless of Presidio's validation scoring
-        _analyzer.registry.add_recognizer(PatternRecognizer(
-            supported_entity="US_SSN",
-            patterns=[Pattern("SSN_PATTERN", r'\b\d{3}-\d{2}-\d{4}\b', 0.90)],
-            context=["ssn", "social security", "social security number"],
-        ))
+        for recognizer in build_recognizers():
+            _analyzer.registry.add_recognizer(recognizer)
         _anonymizer = AnonymizerEngine()
     return _analyzer, _anonymizer
 
@@ -376,6 +381,19 @@ def _fake_value(entity_type: str, fake: Faker) -> str:
         'US_DRIVER_LICENSE': lambda: fake.numerify('D########'),
         'IP_ADDRESS':        fake.ipv4,
         'MEDICAL_LICENSE':   lambda: fake.numerify('ML#######'),
+        'URL':               fake.url,
+        'STREET_ADDRESS':    fake.street_address,
+        'US_ZIP':            fake.postcode,
+        # Safe Harbor (C) aggregates rather than replaces: a specific fake age
+        # over 89 would be just as identifying as the real one.
+        'AGE_OVER_89':       lambda: '90 or older',
+        'MEDICAL_RECORD_NUMBER': lambda: fake.numerify('MRN-#######'),
+        'HEALTH_PLAN_ID':    lambda: fake.numerify('MBR-########'),
+        'ACCOUNT_NUMBER':    lambda: fake.numerify('ACCT-########'),
+        'DEVICE_SERIAL':     lambda: fake.numerify('SN-####-??####').upper(),
+        'VEHICLE_ID':        lambda: fake.numerify('???-####').upper(),
+        'OTHER_IDENTIFIER':  lambda: fake.numerify('ID-########'),
+        'UNRESOLVED_IDENTIFIER': lambda: fake.numerify('ID-########'),
     }
     generator = generators.get(entity_type)
     return generator() if generator else f"[{entity_type}]"
