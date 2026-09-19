@@ -156,9 +156,11 @@ def test_caselaw_passes_through_unredacted(tmp_dir, caselaw_text):
     assert result.doc_type == 'caselaw'
     assert result.pii_stripped is False
     assert result.faker_substitutions == 0
-    rag = out_dir / "rag" / "smith_v_jones.jsonl"
-    assert rag.exists(), "a caselaw document must still produce RAG output"
-    written = '\n'.join(json.loads(l)['text'] for l in rag.read_text().splitlines())
+    rag_files = list((out_dir / "rag").glob("*.jsonl"))
+    assert len(rag_files) == 1, "a caselaw document must still produce RAG output"
+    assert "smith_v_jones" not in rag_files[0].name, "R16: named for its source"
+    written = '\n'.join(json.loads(l)['text']
+                        for l in rag_files[0].read_text().splitlines())
     for verbatim in ("Smith v. Jones", "123 F.3d 456", "AFFIRMED"):
         assert verbatim in written
 
@@ -354,4 +356,4 @@ def test_slip_opinion_still_gets_rag_output(tmp_dir):
 
     assert result.doc_type == 'caselaw'
     assert result.pii_stripped is False
-    assert (out_dir / "rag" / "slip_opinion.jsonl").exists()
+    assert len(list((out_dir / "rag").glob("*.jsonl"))) == 1

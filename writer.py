@@ -217,22 +217,32 @@ def _slugify(filename: str) -> str:
 
 def write_rag_chunks(
     chunks: List[Chunk],
-    source_filename: str,
+    anon_id: str,
     doc_type: str,
     extra_metadata: dict,
     output_dir: Path,
 ) -> None:
+    """Chunked RAG output, keyed on the anonymous id (R16).
+
+    This was the leak with no scrub in front of it at all. The output file was
+    named for the slugified *source filename*, each record's id was built from
+    the same slug, and every record's metadata.source held the real filename --
+    so a patient's name could be the filename on disk, inside the id, and
+    inside every chunk's metadata, none of which the text scrub ever touched.
+
+    Keying on the anonymous id also removes a silent collision: two same-named
+    files in different client folders used to overwrite each other's output.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    slug = _slugify(source_filename)
-    out_path = output_dir / f"{slug}.jsonl"
+    out_path = output_dir / f"{anon_id}.jsonl"
 
     with open(out_path, 'w') as f:
         for c in chunks:
             record = {
-                'id': f"{slug}_chunk_{c.index:03d}",
+                'id': f"{anon_id}_chunk_{c.index:03d}",
                 'text': c.text,
                 'metadata': {
-                    'source': source_filename,
+                    'source': anon_id,
                     'doc_type': doc_type,
                     'chunk_index': c.index,
                     'total_chunks': c.total,

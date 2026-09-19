@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from reporter import generate_reports
+from re_id_risk import risk_report_path
 
 # ---------------------------------------------------------------------------
 # Replacement token map: quasi-identifier type → [TOKEN]
@@ -220,9 +221,16 @@ def run_second_pass(
     dry_run: bool = False,
     quiet: bool = False,
 ) -> dict:
-    report_path = output_dir / 're_id_risk_report.json'
+    # The report moved out of the output directory: it holds the exact
+    # surviving text of every quasi-identifier the adversarial pass found, and
+    # nothing inside that directory may carry an identifier value (R10). It
+    # was hardcoded here as output_dir / 're_id_risk_report.json', and
+    # re_id_risk.py --apply chains straight into this function, so both
+    # readers had to move with it.
+    report_path = risk_report_path(output_dir)
     if not report_path.exists():
-        print(f"No re_id_risk_report.json found. Run re_id_risk.py first.", file=sys.stderr)
+        print(f"No re_id_risk_report.json found at {report_path}. "
+              f"Run re_id_risk.py first.", file=sys.stderr)
         sys.exit(1)
 
     report = json.loads(report_path.read_text())

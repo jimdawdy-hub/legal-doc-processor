@@ -12,20 +12,20 @@ def _make_chunks(n=3):
 
 def test_write_rag_chunks_creates_jsonl(tmp_dir):
     chunks = _make_chunks(3)
-    write_rag_chunks(chunks, "smith_v_jones.pdf", "caselaw", {}, tmp_dir)
-    out = tmp_dir / "smith_v_jones.jsonl"
+    write_rag_chunks(chunks, "anon_4f2c91ab77de", "caselaw", {}, tmp_dir)
+    out = tmp_dir / "anon_4f2c91ab77de.jsonl"
     assert out.exists()
 
 def test_rag_jsonl_has_correct_record_count(tmp_dir):
     chunks = _make_chunks(3)
-    write_rag_chunks(chunks, "opinion.pdf", "caselaw", {}, tmp_dir)
-    lines = (tmp_dir / "opinion.jsonl").read_text().strip().split('\n')
+    write_rag_chunks(chunks, "anon_4f2c91ab77de", "caselaw", {}, tmp_dir)
+    lines = (tmp_dir / "anon_4f2c91ab77de.jsonl").read_text().strip().split('\n')
     assert len(lines) == 3
 
 def test_rag_record_structure(tmp_dir):
     chunks = _make_chunks(2)
-    write_rag_chunks(chunks, "case.pdf", "caselaw", {"citation": "Smith v. Jones, 123 F.3d 456"}, tmp_dir)
-    record = json.loads((tmp_dir / "case.jsonl").read_text().split('\n')[0])
+    write_rag_chunks(chunks, "anon_4f2c91ab77de", "caselaw", {"citation": "Smith v. Jones, 123 F.3d 456"}, tmp_dir)
+    record = json.loads((tmp_dir / "anon_4f2c91ab77de.jsonl").read_text().split('\n')[0])
     assert "id" in record
     assert "text" in record
     assert "metadata" in record
@@ -36,8 +36,8 @@ def test_rag_record_structure(tmp_dir):
 
 def test_rag_id_is_unique_per_chunk(tmp_dir):
     chunks = _make_chunks(3)
-    write_rag_chunks(chunks, "opinion.pdf", "caselaw", {}, tmp_dir)
-    lines = (tmp_dir / "opinion.jsonl").read_text().strip().split('\n')
+    write_rag_chunks(chunks, "anon_4f2c91ab77de", "caselaw", {}, tmp_dir)
+    lines = (tmp_dir / "anon_4f2c91ab77de.jsonl").read_text().strip().split('\n')
     ids = [json.loads(l)["id"] for l in lines]
     assert len(set(ids)) == 3
 

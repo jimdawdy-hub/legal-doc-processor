@@ -108,8 +108,9 @@ def test_provenance_retains_entries_from_an_earlier_run(tmp_dir):
     first.unlink()
     process_directory(inp, out, dry_run=False)
 
-    filenames = {f['original_filename'] for f in _provenance(out)['files']}
-    assert 'visit_a.txt' in filenames, (
+    from utils import anon_id
+    kept = {f['anon_id'] for f in _provenance(out)['files']}
+    assert anon_id(first) in kept, (
         "a document processed in the first run vanished from provenance"
     )
     assert _provenance(out)['summary']['total_files'] == 2

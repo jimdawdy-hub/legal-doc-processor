@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from utils import document_key, sha256_file, HOLD_BACK_LABELS
+from utils import anon_id, document_key, sha256_file, HOLD_BACK_LABELS
 
 
 class ProvenanceManifest:
@@ -61,10 +61,13 @@ class ProvenanceManifest:
         skip_reason: Optional[str] = None,
     ) -> None:
         sidecar_info = self.sidecar.get(original_path.name, {})
+        # R16: no filename, no path, no folder name. This manifest is inside
+        # the output directory, so a client folder named for the patient used
+        # to reach the deliverable verbatim. The id-to-filename mapping lives
+        # in the evidence record instead, outside that directory.
         self._files.append({
             'doc_key': document_key(original_path),
-            'original_filename': original_path.name,
-            'source_path': str(original_path.resolve()),
+            'anon_id': anon_id(original_path),
             'sha256': sha256_file(original_path),
             'doc_type': doc_type,
             'classification_confidence': round(classification_confidence, 3),
@@ -102,7 +105,7 @@ class ProvenanceManifest:
 
         merged, order = {}, []
         for entry in previous + self._files:
-            key = entry.get('doc_key') or entry.get('original_filename')
+            key = entry.get('doc_key') or entry.get('anon_id')
             if key not in merged:
                 order.append(key)
             merged[key] = entry
@@ -135,7 +138,9 @@ class ProvenanceManifest:
             ),
             'pii_review_flags': sum(f['processing']['review_flags'] for f in processed),
         }
+        # No manifest-level source_dir either: it held the resolved input
+        # directory, which is the third and most easily missed way a client
+        # folder name reached the deliverable (R16). It is recorded in the
+        # evidence record, outside this directory.
         manifest = {**self._dataset_meta, 'files': self._files, 'summary': summary}
-        if self._source_dir:
-            manifest['source_dir'] = self._source_dir
         self.manifest_path.write_text(json.dumps(manifest, indent=2))

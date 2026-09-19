@@ -1,3 +1,4 @@
+import json
 import re
 import shutil
 import uuid
@@ -180,6 +181,37 @@ def _quarantine_reason(doc_type: str, pii_result) -> Optional[str]:
     return None
 
 
+def legacy_output_directories(search_roots) -> list:
+    """Output directories produced before source identities were evicted.
+
+    Their provenance entries carry real filenames and full source paths -- the
+    exact R16 leak this closes for new runs. Assumptions call such directories
+    disposable, but disposable is not deleted: absent an explicit check, the
+    work can be wholly complete while the leak still sits on disk.
+
+    Detected by provenance shape, not by age: a manifest whose file entries
+    still carry original_filename or source_path, or which still records a
+    manifest-level source_dir.
+    """
+    found = []
+    for root in search_roots:
+        root = Path(root)
+        if not root.is_dir():
+            continue
+        for manifest_path in sorted(root.rglob('provenance.json')):
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            leaks = 'source_dir' in manifest or any(
+                'original_filename' in entry or 'source_path' in entry
+                for entry in manifest.get('files', [])
+            )
+            if leaks:
+                found.append(manifest_path.parent)
+    return found
+
+
 def _new_batch_id() -> str:
     return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ-') + uuid.uuid4().hex[:8]
 
@@ -265,7 +297,8 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False,
         if doc_type in ('caselaw', 'published'):
             extra = _caselaw_meta(text) if doc_type == 'caselaw' else {}
             extra['ocr'] = read_result.ocr
-            write_rag_chunks(chunks, path.name, doc_type, extra, output_dir / 'rag')
+            write_rag_chunks(chunks, anon_id(path), doc_type, extra,
+                             output_dir / 'rag')
 
         if doc_type in ('private', 'uncertain', 'published'):
             write_finetune_record(
@@ -418,6 +451,18 @@ def process_directory(
         print(f"  {records_root()}/verification/{batch_id}/ — original values")
         print(f"  Accept this batch to delete its original values:")
         print(f"    python3.12 review_pii.py --accept {batch_id}")
+
+        legacy = [d for d in legacy_output_directories([output_dir.parent])
+                  if d != output_dir]
+        if legacy:
+            print(f"\n  WARNING: {len(legacy)} output director(y/ies) from before "
+                  f"source identities were evicted are still on disk.")
+            print(f"  Their provenance entries carry real filenames and full "
+                  f"source paths:")
+            for directory in legacy:
+                print(f"    {directory}")
+            print(f"  Review and delete them:  "
+                  f"python3.12 process.py --find-legacy-output <dir>")
 
         stale = unaccepted_batches(exclude=batch_id)
         if stale:

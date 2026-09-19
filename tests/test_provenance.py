@@ -69,7 +69,11 @@ def test_provenance_per_file_record_structure(tmp_dir):
     m.save()
     data = json.loads((tmp_dir / 'provenance.json').read_text())
     record = data['files'][0]
-    assert 'original_filename' in record
+    # R16: the manifest is inside the output directory, so it names documents
+    # only by their anonymous id.
+    assert 'anon_id' in record
+    assert 'original_filename' not in record
+    assert 'source_path' not in record
     assert 'sha256' in record
     assert 'doc_type' in record
     assert 'date_processed' in record

@@ -10,7 +10,11 @@ Usage:
     python3.12 re_id_risk.py --output /path/to/output [--samples 20] [--quiet]
 
 Output:
-    output/re_id_risk_report.json   — full per-record assessments + summary
+    <records>/verification/<batch>/re_id_risk_report.json
+                                   — full per-record assessments + summary.
+                                     Outside the output directory: it holds the
+                                     exact surviving text of every quasi-identifier
+                                     it finds.
     Appends a risk section to output/summary.html if it exists
 """
 
@@ -22,6 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
+
+sys.path.insert(0, str(Path(__file__).parent))
+from writer import records_root, unaccepted_batches
 
 DEFAULT_MODEL = os.environ.get('RE_ID_MODEL', 'claude-opus-4-7')
 
@@ -207,8 +214,10 @@ def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False,
         'assessments': assessments,
     }
 
-    report_path = output_dir / 're_id_risk_report.json'
+    report_path = risk_report_path(output_dir)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2))
+    report_path.chmod(0o600)
     if not quiet:
         print(f"\n  Report saved → {report_path}")
 
@@ -220,6 +229,28 @@ def run_assessment(output_dir: Path, max_samples: int = 20, quiet: bool = False,
 # ---------------------------------------------------------------------------
 # HTML section appended to summary.html
 # ---------------------------------------------------------------------------
+
+def risk_report_path(output_dir: Path, batch_id: str = None) -> Path:
+    """Where the adversarial report lives -- outside the output directory.
+
+    For every quasi-identifier this pass finds, the report holds the exact
+    surviving text: by construction, values just proved to be identifying. It
+    therefore belongs beside the verification record and shares its lifetime,
+    not inside the directory that leaves the machine (R10, KTD7).
+
+    With no batch named, it resolves to the most recently opened batch that has
+    not been accepted -- the one whose records were just assessed. Both readers
+    call this, so they cannot drift apart: second_pass.run_second_pass used to
+    hardcode the path, and re_id_risk.py --apply chains straight into it.
+
+    A storage change, not the model migration deferred in Scope Boundaries.
+    """
+    if batch_id is None:
+        open_batches = sorted(unaccepted_batches(),
+                              key=lambda info: info.get('opened_at', ''))
+        batch_id = open_batches[-1]['batch_id'] if open_batches else 'latest'
+    return records_root() / 'verification' / batch_id / 're_id_risk_report.json'
+
 
 def _risk_colour(level: str) -> str:
     return {
@@ -260,10 +291,12 @@ def _append_risk_section(html_path: Path, report: dict) -> None:
         bg = _risk_colour(level)
         tc = _risk_text_colour(level)
         qi = a.get('quasi_identifiers', [])
-        qi_str = '; '.join(
-            f"{q.get('type','')}: <em>{_hesc(str(q.get('value',''))[:80])}</em>"
-            for q in qi[:4]
-        ) or '—'
+        # Types and a count, never the values. This section is spliced into
+        # summary.html, inside the output directory, and these values are
+        # exactly the ones this pass just proved to be identifying (R10).
+        qi_types = sorted({str(q.get('type', '')) for q in qi if q.get('type')})
+        qi_str = (f"{len(qi)} found — " + ', '.join(_hesc(t) for t in qi_types[:6])
+                  ) if qi else '&mdash;'
         recs = a.get('recommendations', [])
         rec_str = (' '.join(
             f'<li>{_hesc(r)}</li>' for r in recs[:3]
@@ -317,7 +350,7 @@ def _hesc(s: str) -> str:
 def retry_errors(output_dir: Path, quiet: bool = False,
                   model: str = DEFAULT_MODEL) -> None:
     """Re-run only PARSE_ERROR records from an existing report."""
-    report_path = output_dir / 're_id_risk_report.json'
+    report_path = risk_report_path(output_dir)
     dataset_path = output_dir / 'finetune' / 'dataset.jsonl'
     if not report_path.exists():
         print("No existing report to retry.", file=sys.stderr)
@@ -411,7 +444,7 @@ def main() -> None:
 
     if args.retry_errors:
         retry_errors(args.output, quiet=args.quiet, model=args.model or DEFAULT_MODEL)
-        report = json.loads((args.output / 're_id_risk_report.json').read_text())
+        report = json.loads(risk_report_path(args.output).read_text())
     else:
         report = run_assessment(args.output, max_samples=args.samples, quiet=args.quiet,
                                 model=args.model or DEFAULT_MODEL)
