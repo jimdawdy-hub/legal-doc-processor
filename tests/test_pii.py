@@ -1,5 +1,23 @@
+import re
+from datetime import datetime
+
 import pytest
+from presidio_analyzer import RecognizerResult
+
+import pii as pii_module
 from pii import strip_pii, PIIResult
+
+
+def _with_detections(monkeypatch, detections):
+    """Pin the analyzer's output so replacement can be tested on its own.
+
+    Replacement defects are about spans and offsets, not about detection, and
+    spaCy's span boundaries are not stable enough to reproduce them through the
+    real analyzer.
+    """
+    monkeypatch.setattr(
+        pii_module, '_analyze_chunked', lambda analyzer, text: list(detections)
+    )
 
 SAMPLE_PRIVATE = (
     "James Kowalski filed a motion. His SSN is 123-45-6789. "
@@ -51,3 +69,100 @@ def test_clean_text_unchanged():
     result = strip_pii(text, "statute.pdf", output_mode='finetune')
     assert result.substitutions == 0
     assert result.text == text
+
+
+# --- U3: replacement goes through the library ---------------------------------
+# The hand-rolled replacement dropped the loser of an overlap in one mode and
+# spliced over it in the other. Measured on the text below, finetune mode
+# produced 'Patient Norma Fisher-9083 end' (four digits of the SSN survived) and
+# placeholder mode produced 'Patient [PERSON]N] end' (corrupted).
+
+OVERLAP_TEXT = "Patient Harold Vance 412-55-9083 end"
+# A PERSON span that runs past the name and into the SSN -- the shape spaCy
+# actually produced on the discharge summary.
+OVERLAP_DETECTIONS = [
+    RecognizerResult("PERSON", 8, 27, 0.85),
+    RecognizerResult("US_SSN", 21, 32, 0.90),
+]
+
+def test_overlapping_detections_leave_no_fragment(monkeypatch):
+    # Fragments chosen to be diagnostic rather than chance-sensitive: a
+    # synthetic SSN is itself digits, so a two-digit run like '55' can reappear
+    # by coincidence. '9083' is the tail the hand-rolled version actually left
+    # behind, and the names cannot collide with a replacement value.
+    _with_detections(monkeypatch, OVERLAP_DETECTIONS)
+    result = strip_pii(OVERLAP_TEXT, "discharge.pdf", output_mode='finetune')
+    for fragment in ("412-55-9083", "9083", "Harold", "Vance"):
+        assert fragment not in result.text, (
+            f"{fragment!r} survived replacement: {result.text!r}"
+        )
+
+def test_overlapping_detections_produce_well_formed_tokens(monkeypatch):
+    _with_detections(monkeypatch, OVERLAP_DETECTIONS)
+    result = strip_pii(OVERLAP_TEXT, "discharge.pdf", output_mode='rag')
+    # Every bracket that opens must close, with a known entity type inside it.
+    tokens = re.findall(r'\[[^\[\]]*\]', result.text)
+    assert tokens, f"no tokens emitted: {result.text!r}"
+    for token in tokens:
+        assert token.strip('[]') in pii_module.ENTITY_TYPES, f"spliced token {token!r}"
+    assert result.text.count('[') == result.text.count(']')
+    # Placeholder tokens carry no digits, so this check is exact: any digit left
+    # in the output came from the original identifier.
+    assert not any(ch.isdigit() for ch in result.text), (
+        f"digits of the original survived: {result.text!r}"
+    )
+    for fragment in ("Harold", "Vance"):
+        assert fragment not in result.text
+
+def test_repeated_name_gets_one_consistent_value(monkeypatch):
+    text = "John Smith filed the motion. John Smith appeared in court."
+    first, second = text.index("John"), text.rindex("John")
+    _with_detections(monkeypatch, [
+        RecognizerResult("PERSON", first, first + 10, 0.90),
+        RecognizerResult("PERSON", second, second + 10, 0.90),
+    ])
+    result = strip_pii(text, "brief.pdf", output_mode='finetune')
+    assert "John Smith" not in result.text
+    before, _, after = result.text.partition(" filed the motion. ")
+    assert after.endswith(" appeared in court.")
+    assert before == after[:-len(" appeared in court.")], (
+        f"one name became two different values: {result.text!r}"
+    )
+
+def test_same_name_in_two_documents_gets_different_values(monkeypatch):
+    """R15: Faker.seed(0) was fixed at module level, so every document's first
+    person became 'Norma Fisher'. A fixed scheme is inferable from a handful of
+    outputs, which the de-identification literature treats as a re-identification
+    path."""
+    outputs = set()
+    for filler in ("filed the motion.", "met the surgeon.", "signed the consent form."):
+        text = f"John Smith {filler}"
+        _with_detections(monkeypatch, [RecognizerResult("PERSON", 0, 10, 0.90)])
+        outputs.add(strip_pii(text, "doc.pdf", output_mode='finetune').text[:-len(filler)])
+    assert len(outputs) > 1, f"every document produced the same fake name: {outputs}"
+
+def test_bare_year_is_not_replaced_by_a_full_date(monkeypatch):
+    """R4: replacement must be type-correct. A model year routed through date
+    handling came back as '2020-10-23'."""
+    text = "The vehicle is a 2019 sedan."
+    start = text.index("2019")
+    _with_detections(monkeypatch, [RecognizerResult("DATE_TIME", start, start + 4, 0.90)])
+    result = strip_pii(text, "claim.pdf", output_mode='finetune')
+    replaced = result.text[len("The vehicle is a "):].split(" sedan")[0]
+    assert re.fullmatch(r'\d{4}', replaced), (
+        f"a bare year became {replaced!r}"
+    )
+
+def test_dates_keep_their_format_and_their_interval(monkeypatch):
+    text = "Admitted 03/01/2025 and discharged 03/15/2025."
+    a, b = text.index("03/01/2025"), text.index("03/15/2025")
+    _with_detections(monkeypatch, [
+        RecognizerResult("DATE_TIME", a, a + 10, 0.90),
+        RecognizerResult("DATE_TIME", b, b + 10, 0.90),
+    ])
+    result = strip_pii(text, "discharge.pdf", output_mode='finetune')
+    found = re.findall(r'\d{2}/\d{2}/\d{4}', result.text)
+    assert len(found) == 2, f"date format not preserved: {result.text!r}"
+    assert found[0] != "03/01/2025" and found[1] != "03/15/2025"
+    shifted = [datetime.strptime(d, "%m/%d/%Y") for d in found]
+    assert (shifted[1] - shifted[0]).days == 14, "clinical interval not preserved"

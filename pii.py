@@ -9,6 +9,7 @@ from utils import sha256_file
 from faker import Faker
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import ConflictResolutionStrategy, OperatorConfig
 
 try:
     from dateutil import parser as dateutil_parser
@@ -79,6 +80,11 @@ def _fmt_month_yyyy(dt, _orig):
 def _fmt_mon_yyyy(dt, _orig):
     return f"{_MONTH_SHORT[dt.month-1]} {dt.year}"
 
+def _fmt_year_only(dt, _orig):
+    # R4: a bare year is a year. Returning a full date for "2019" invented a
+    # month and a day that were never in the document.
+    return str(dt.year)
+
 _DATE_FORMAT_PATTERNS = [
     # Full month name + day + year:  "March 15, 2024"
     (re.compile(r'\b(?:January|February|March|April|May|June|July|August|'
@@ -107,6 +113,10 @@ _DATE_FORMAT_PATTERNS = [
     # Short month + year: "Mar 2024"
     (re.compile(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{4}\b', re.I),
      _fmt_mon_yyyy),
+    # Bare year on its own: "2019". Checked last so a year inside a fuller date
+    # is handled by the pattern above it.
+    (re.compile(r'^\s*\d{4}\s*$'),
+     _fmt_year_only),
 ]
 
 
@@ -168,7 +178,7 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
                             so temporal relationships are preserved.
     output_mode='rag': replace with [ENTITY_TYPE] tokens.
     """
-    analyzer, _ = _get_engines()
+    analyzer, anonymizer = _get_engines()
     results = _analyze_chunked(analyzer, text)
 
     high = [r for r in results if r.score >= HIGH_CONFIDENCE]
@@ -191,16 +201,78 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
     if not to_redact:
         return PIIResult(text=text, substitutions=0, review_flags=review_flags)
 
-    if output_mode == 'finetune':
-        redacted_text = _faker_replace(text, to_redact)
-    else:
-        redacted_text = _token_replace(text, to_redact)
+    # KTD1/KTD2: the library resolves overlapping spans by trimming at the
+    # boundary and clamps its splice buffer against re-consuming text. The
+    # hand-rolled replacement this replaces dropped the loser of an overlap in
+    # finetune mode (leaving digits of an SSN behind) and spliced over it in
+    # placeholder mode (producing '[PERSON]N]'). REMOVE_INTERSECTIONS is given
+    # explicitly so the guarantee is structural rather than incidental.
+    anonymized = anonymizer.anonymize(
+        text=text,
+        analyzer_results=to_redact,
+        operators=_build_operators(text, output_mode),
+        conflict_resolution=ConflictResolutionStrategy.REMOVE_INTERSECTIONS,
+    )
 
     return PIIResult(
-        text=redacted_text,
-        substitutions=len(to_redact),
+        text=anonymized.text,
+        substitutions=len(anonymized.items),
         review_flags=review_flags,
     )
+
+
+def _doc_faker(text: str) -> Faker:
+    """A Faker seeded from the document's own content (KTD4).
+
+    Faker.seed() sets a shared class-level seed, so a fixed module-level
+    Faker.seed(0) made every document's first person 'Norma Fisher' -- measured
+    across three unrelated documents. A fixed substitution scheme is inferable
+    from a handful of outputs, which the de-identification literature treats as
+    an assisted re-identification path. Seeding per document from the content
+    hash keeps a re-run reproducible while varying across documents.
+    """
+    digest = hashlib.sha256(text[:4096].encode('utf-8', errors='replace')).hexdigest()
+    fake = Faker()
+    fake.seed_instance(int(digest[:16], 16))
+    return fake
+
+
+def _build_operators(text: str, output_mode: str) -> dict:
+    """One operator per entity type.
+
+    'rag' mode uses the library's own replace operator, so tokens are always
+    well formed. 'finetune' mode uses a custom callable per type, memoised on
+    its input string -- which is mandatory, not an optimisation. The library
+    calls a custom operator twice per entity: first with the literal string
+    'PII' to validate the operator, then with the real value (KTD3). A
+    counter-based replacer therefore produced 'NAME4 met NAME2'. Keying the
+    cache on the value makes the validation call a harmless throwaway entry and
+    delivers within-document consistency at the same time.
+    """
+    if output_mode != 'finetune':
+        return {
+            entity: OperatorConfig("replace", {"new_value": f"[{entity}]"})
+            for entity in ENTITY_TYPES
+        }
+
+    fake = _doc_faker(text)
+    date_offset = _doc_date_offset(text)
+    cache: dict = {}
+
+    def _replacer(entity_type: str):
+        def replace(value: str) -> str:
+            if value not in cache:
+                if entity_type == 'DATE_TIME':
+                    cache[value] = _shift_date(value, date_offset)
+                else:
+                    cache[value] = _fake_value(entity_type, fake)
+            return cache[value]
+        return replace
+
+    return {
+        entity: OperatorConfig("custom", {"lambda": _replacer(entity)})
+        for entity in ENTITY_TYPES
+    }
 
 
 def _analyze_chunked(analyzer, text: str) -> list:
@@ -224,59 +296,27 @@ def _analyze_chunked(analyzer, text: str) -> list:
     return all_results
 
 
-def _deduplicate_overlaps(entities: list) -> list:
-    """Remove overlapping entities, keeping the one that starts earliest."""
-    if not entities:
-        return entities
-    sorted_ents = sorted(entities, key=lambda x: (x.start, -(x.end - x.start)))
-    deduped = [sorted_ents[0]]
-    for ent in sorted_ents[1:]:
-        prev = deduped[-1]
-        if ent.start < prev.end:
-            continue
-        deduped.append(ent)
-    return deduped
-
-
-def _faker_replace(text: str, entities: list) -> str:
-    fake = Faker()
-    Faker.seed(0)
-    substitution_table: dict = {}
-    date_offset = _doc_date_offset(text)
-    entities = _deduplicate_overlaps(entities)
-
-    for r in sorted(entities, key=lambda x: x.start, reverse=True):
-        original = text[r.start:r.end]
-        if original not in substitution_table:
-            if r.entity_type == 'DATE_TIME':
-                substitution_table[original] = _shift_date(original, date_offset)
-            else:
-                substitution_table[original] = _fake_value(r.entity_type, fake)
-        text = text[:r.start] + substitution_table[original] + text[r.end:]
-
-    return text
-
-
-def _token_replace(text: str, entities: list) -> str:
-    for r in sorted(entities, key=lambda x: x.start, reverse=True):
-        token = f"[{r.entity_type}]"
-        text = text[:r.start] + token + text[r.end:]
-    return text
-
-
 def _fake_value(entity_type: str, fake: Faker) -> str:
-    mapping = {
-        'PERSON':            fake.name(),
-        'PHONE_NUMBER':      fake.phone_number(),
-        'EMAIL_ADDRESS':     fake.email(),
-        'LOCATION':          fake.address().replace('\n', ', '),
-        'US_SSN':            fake.ssn(),
-        'DATE_TIME':         fake.date(),  # fallback only — normally handled by _shift_date
-        'US_BANK_NUMBER':    fake.bban(),
-        'CREDIT_CARD':       fake.credit_card_number(),
-        'US_PASSPORT':       f"{''.join(fake.random_letters(2)).upper()}{fake.numerify('#######')}",
-        'US_DRIVER_LICENSE': fake.numerify('D########'),
-        'IP_ADDRESS':        fake.ipv4(),
-        'MEDICAL_LICENSE':   fake.numerify('ML#######'),
+    """A type-correct synthetic stand-in (R4).
+
+    Built lazily: the generators are only called for the type being replaced,
+    so producing one fake name does not also consume a credit card number and
+    an IP address from the document's seeded stream.
+    """
+    generators = {
+        'PERSON':            fake.name,
+        'PHONE_NUMBER':      fake.phone_number,
+        'EMAIL_ADDRESS':     fake.email,
+        'LOCATION':          lambda: fake.address().replace('\n', ', '),
+        'US_SSN':            fake.ssn,
+        'DATE_TIME':         fake.date,  # fallback only — normally _shift_date
+        'US_BANK_NUMBER':    fake.bban,
+        'CREDIT_CARD':       fake.credit_card_number,
+        'US_PASSPORT':       lambda: (f"{''.join(fake.random_letters(2)).upper()}"
+                                      f"{fake.numerify('#######')}"),
+        'US_DRIVER_LICENSE': lambda: fake.numerify('D########'),
+        'IP_ADDRESS':        fake.ipv4,
+        'MEDICAL_LICENSE':   lambda: fake.numerify('ML#######'),
     }
-    return mapping.get(entity_type, f"[{entity_type}]")
+    generator = generators.get(entity_type)
+    return generator() if generator else f"[{entity_type}]"
