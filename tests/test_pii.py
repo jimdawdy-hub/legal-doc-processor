@@ -153,6 +153,95 @@ def test_bare_year_is_not_replaced_by_a_full_date(monkeypatch):
         f"a bare year became {replaced!r}"
     )
 
+# --- U4: over-long spans and chunk boundaries --------------------------------
+
+# spaCy labelled this whole run -- URL, line break, and the next line's first
+# word -- as one PERSON at 0.85, and replacement deleted all of it. The
+# surrounding text gave no sign a line was missing.
+OVER_LONG_TEXT = "See https://records.example.org/rfenwick48\nPhotograph on file."
+
+def test_over_long_span_does_not_destroy_the_following_line(monkeypatch):
+    start = OVER_LONG_TEXT.index("https")
+    end = OVER_LONG_TEXT.index("Photograph") + len("Photograph")
+    _with_detections(monkeypatch, [RecognizerResult("PERSON", start, end, 0.85)])
+    result = strip_pii(OVER_LONG_TEXT, "record.pdf", output_mode='rag')
+    assert "Photograph on file." in result.text, (
+        f"the next line was swallowed by the span: {result.text!r}"
+    )
+
+def test_clamp_stops_a_span_at_the_start_of_new_text():
+    start = OVER_LONG_TEXT.index("https")
+    end = OVER_LONG_TEXT.index("Photograph") + len("Photograph")
+    clamped = pii_module._clamp_span(OVER_LONG_TEXT, start, end)
+    assert OVER_LONG_TEXT[start:clamped] == "https://records.example.org/rfenwick48"
+
+def test_clamp_keeps_a_name_wrapped_across_a_soft_break():
+    """PDF extraction wraps long names. Truncating at the break would leak the
+    second line, so a genuine wrap must survive."""
+    text = "Attending physician Harold\nVance signed the discharge order."
+    start = text.index("Harold")
+    end = text.index("Vance") + len("Vance")
+    assert pii_module._clamp_span(text, start, end) == end
+
+def test_wrapped_name_is_redacted_on_both_lines(monkeypatch):
+    text = "Attending physician Harold\nVance signed the discharge order."
+    start = text.index("Harold")
+    end = text.index("Vance") + len("Vance")
+    _with_detections(monkeypatch, [RecognizerResult("PERSON", start, end, 0.90)])
+    result = strip_pii(text, "record.pdf", output_mode='rag')
+    assert "Harold" not in result.text and "Vance" not in result.text
+    assert "signed the discharge order." in result.text
+
+def test_clamp_stops_a_span_crossing_two_line_breaks():
+    """A name wraps once. Twice means the span has run into unrelated text."""
+    text = "Harold\nVance\nPhotograph on file."
+    end = text.index("Photograph") + len("Photograph")
+    clamped = pii_module._clamp_span(text, 0, end)
+    assert text[0:clamped] == "Harold\nVance"
+
+@pytest.mark.parametrize('text,start,end', [
+    (OVER_LONG_TEXT, OVER_LONG_TEXT.index("https"), len(OVER_LONG_TEXT)),
+    ("Harold\nVance signed it.", 0, len("Harold\nVance")),
+    ("no line breaks at all here", 3, 11),
+    ("\nleading break", 0, 8),
+    ("trailing break\n", 0, 15),
+])
+def test_clamp_never_extends_a_span(text, start, end):
+    assert pii_module._clamp_span(text, start, end) <= end
+
+def test_over_long_span_preserves_every_line(monkeypatch, lines_preserved):
+    start = OVER_LONG_TEXT.index("https")
+    end = OVER_LONG_TEXT.index("Photograph") + len("Photograph")
+    _with_detections(monkeypatch, [RecognizerResult("PERSON", start, end, 0.85)])
+    result = strip_pii(OVER_LONG_TEXT, "record.pdf", output_mode='rag')
+    lines_preserved(OVER_LONG_TEXT, result.text)
+
+def test_identifier_straddling_a_chunk_boundary_is_caught_once(monkeypatch):
+    """The fixed-width split cut mid-identifier and re-mapped offsets by hand,
+    so an SSN across the cut was missed silently."""
+    monkeypatch.setattr(pii_module, 'MAX_PRESIDIO_CHARS', 400)
+    monkeypatch.setattr(pii_module, 'CHUNK_OVERLAP_CHARS', 120)
+    filler = "The patient was seen in the outpatient clinic today. "
+    head = (filler * 20)[:395]
+    text = head + "412-55-9083" + " " + (filler * 5)
+    assert text.index("412-55-9083") < 400 < text.index("412-55-9083") + 11, (
+        "fixture must straddle the boundary"
+    )
+    result = strip_pii(text, "record.pdf", output_mode='rag')
+    assert "412-55-9083" not in result.text
+    assert result.text.count("[US_SSN]") == 1, (
+        f"expected exactly one redaction, got {result.text.count('[US_SSN]')}"
+    )
+
+@pytest.mark.parametrize('mode', ['finetune', 'rag'])
+def test_round_trip_preserves_every_line(discharge_text, lines_preserved, mode):
+    """U4's verification, through the real analyzer rather than pinned spans:
+    every line entering strip_pii is represented in its output."""
+    from cleaner import clean
+    source = clean(discharge_text('copyright'))
+    result = strip_pii(source, "discharge_summary.pdf", output_mode=mode)
+    lines_preserved(source, result.text)
+
 def test_dates_keep_their_format_and_their_interval(monkeypatch):
     text = "Admitted 03/01/2025 and discharged 03/15/2025."
     a, b = text.index("03/01/2025"), text.index("03/15/2025")

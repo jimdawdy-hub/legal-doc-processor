@@ -8,6 +8,7 @@ from utils import sha256_file
 
 from faker import Faker
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
+from presidio_analyzer.chunkers import CharacterBasedTextChunker
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import ConflictResolutionStrategy, OperatorConfig
 
@@ -27,6 +28,9 @@ class PIIResult:
 
 HIGH_CONFIDENCE = 0.85
 MAX_PRESIDIO_CHARS = 900_000  # spaCy's default limit is 1M; stay safely under it
+# Overlap between analysis chunks. Must exceed the longest identifier format in
+# scope, or an identifier longer than the overlap can still straddle a cut.
+CHUNK_OVERLAP_CHARS = 512
 LOW_CONFIDENCE = 0.50
 
 ENTITY_TYPES = [
@@ -179,7 +183,7 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
     output_mode='rag': replace with [ENTITY_TYPE] tokens.
     """
     analyzer, anonymizer = _get_engines()
-    results = _analyze_chunked(analyzer, text)
+    results = _clamp_over_long_spans(text, _analyze_chunked(analyzer, text))
 
     high = [r for r in results if r.score >= HIGH_CONFIDENCE]
     medium = [r for r in results if LOW_CONFIDENCE <= r.score < HIGH_CONFIDENCE]
@@ -276,24 +280,79 @@ def _build_operators(text: str, output_mode: str) -> dict:
 
 
 def _analyze_chunked(analyzer, text: str) -> list:
-    """
-    Run Presidio in chunks to avoid spaCy's 1M character limit.
-    Adjusts entity start/end offsets by chunk position before returning.
-    """
-    if len(text) <= MAX_PRESIDIO_CHARS:
-        return analyzer.analyze(text=text, entities=ENTITY_TYPES, language='en')
+    """Run the analyzer, chunking long documents to stay under spaCy's limit.
 
-    all_results = []
-    offset = 0
-    while offset < len(text):
-        chunk = text[offset:offset + MAX_PRESIDIO_CHARS]
-        chunk_results = analyzer.analyze(text=chunk, entities=ENTITY_TYPES, language='en')
-        for r in chunk_results:
-            r.start += offset
-            r.end += offset
-        all_results.extend(chunk_results)
-        offset += MAX_PRESIDIO_CHARS
-    return all_results
+    The previous version cut at a fixed character count with no overlap and
+    re-mapped offsets by hand, so an identifier straddling the cut was split in
+    two and missed silently -- measured: an SSN across the boundary produced
+    zero detections. presidio_analyzer.chunkers is public in the pinned 2.2.362
+    and already does boundary-aware chunking with overlap, offset re-mapping
+    and cross-chunk deduplication.
+    """
+    def predict(chunk_text: str) -> list:
+        return analyzer.analyze(text=chunk_text, entities=ENTITY_TYPES, language='en')
+
+    chunker = CharacterBasedTextChunker(
+        chunk_size=MAX_PRESIDIO_CHARS,
+        chunk_overlap=CHUNK_OVERLAP_CHARS,
+    )
+    return chunker.predict_with_chunking(text, predict)
+
+
+# A trailing / leading plain-alphabetic word, which is what each half of a name
+# wrapped by PDF extraction looks like.
+_NAME_TOKEN_END = re.compile(r"[A-Za-z][A-Za-z'\-]*\Z")
+_NAME_TOKEN_START = re.compile(r"\A[A-Za-z][A-Za-z'\-]*")
+# A line that opens a new labelled field: "Medical Record Number: 4417392".
+_LABELLED_FIELD = re.compile(r"\A[A-Za-z][A-Za-z0-9 .\-/']{0,40}:")
+
+
+def _clamp_span(text: str, start: int, end: int) -> int:
+    """Return an end offset that does not run past a line break into new text.
+
+    The rule, in one sentence: a detection may cross at most one line break,
+    and only when the words on both sides of it are plain alphabetic and the
+    new line does not open a labelled field -- which is what a person's name
+    wrapped across a soft break looks like, and nothing else is.
+
+    Clamping at any newline would be too blunt, because a genuinely wrapped
+    name is a legitimate multi-line span and truncating it would leak the
+    second line.
+    """
+    breaks = [start + m.start() for m in re.finditer(r'\n', text[start:end])]
+    for i, position in enumerate(breaks):
+        before = text[start:position].rstrip(' \t')
+        after = text[position + 1:end].lstrip(' \t')
+        # The whole following line, not just the part inside the span: a span
+        # ending mid-label would otherwise hide the colon that identifies it.
+        line_after = text[position + 1:].split('\n', 1)[0].lstrip(' \t')
+        wrapped_name = (
+            i == 0
+            and _NAME_TOKEN_END.search(before) is not None
+            and _NAME_TOKEN_START.match(after) is not None
+            and _LABELLED_FIELD.match(line_after) is None
+        )
+        if not wrapped_name:
+            return position
+    return end
+
+
+def _clamp_over_long_spans(text: str, results: list) -> list:
+    """Correct detections before they reach the anonymizer (R2).
+
+    The library faithfully replaces whatever span it is given, so an over-long
+    span has to be shortened here. spaCy labelled a URL, a line break and the
+    following line's first word as one PERSON at 0.85, and replacement deleted
+    all of it.
+    """
+    kept = []
+    for r in results:
+        clamped = _clamp_span(text, r.start, r.end)
+        if clamped <= r.start:
+            continue
+        r.end = clamped
+        kept.append(r)
+    return kept
 
 
 def _fake_value(entity_type: str, fake: Faker) -> str:

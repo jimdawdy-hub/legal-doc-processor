@@ -110,6 +110,30 @@ def discharge_summary(footer: str = 'copyright') -> str:
     return f"{DISCHARGE_SUMMARY_BASE}\n{PUBLISHED_LOOKALIKE_FOOTERS[footer]}\n"
 
 
+def assert_lines_preserved(source: str, scrubbed: str) -> None:
+    """Every line entering strip_pii is represented in its output.
+
+    Scoped to the scrub step on purpose. cleaner.clean() deliberately deletes
+    whole lines before this point -- publisher footers, thrice-repeated running
+    headers, blank runs -- so the same assertion made end to end would be false
+    and would fail over a mis-scoped test rather than a real defect.
+    """
+    src_lines = source.split('\n')
+    out_lines = scrubbed.split('\n')
+    assert len(out_lines) == len(src_lines), (
+        f"line count changed: {len(src_lines)} in, {len(out_lines)} out -- "
+        f"a span ran past a line break and swallowed the next line"
+    )
+    for i, (before, after) in enumerate(zip(src_lines, out_lines)):
+        if before.strip():
+            assert after.strip(), f"line {i} was emptied: {before!r}"
+
+
+@pytest.fixture
+def lines_preserved():
+    return assert_lines_preserved
+
+
 @pytest.fixture
 def discharge_text():
     """Factory: discharge_text(footer) -> a synthetic discharge summary."""
