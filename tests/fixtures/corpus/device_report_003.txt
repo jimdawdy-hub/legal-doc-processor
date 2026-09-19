@@ -1,0 +1,18 @@
+RIVERTON ORTHOPAEDIC SURGERY CENTER
+Implant and Transport Record
+
+Patient: Cecil Broadwater
+Medical Record No.: MRN-8830271
+Procedure Date: 06/18/2025
+
+Implanted Device Serial Number: SN-4471-XQ9920
+Device UDI: (01)00819320041234(17)270630(10)LOT4471
+Infusion Pump Asset Tag: ASSET-220417
+
+Patient transported by family vehicle.
+License Plate: IL PVT-4417
+Vehicle Identification Number: 1HGCM82633A004352
+
+Study Participant Code: RVT-2025-0431
+
+Discharged to home at 14:20. Follow-up imaging in six weeks.

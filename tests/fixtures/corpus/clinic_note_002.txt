@@ -1,0 +1,22 @@
+RIVERTON FAMILY MEDICINE
+Office Visit Note
+
+Patient: Wanda Ferris
+Health Plan Member ID: 1EG4TE5MK73
+Group Number: GRP-4482
+Billing Account Number: 88-4410-22
+
+Referring Provider: Dr. Marcus Oyelaran
+NPI: 1234567893
+DEA Number: AB1234563
+State Medical License: IL-036-114829
+
+Contact: wferris@example.org
+Cell: 773-555-0166
+Patient Portal: https://portal.example-clinic.org/patients/wferris91
+Portal last accessed from 203.0.113.47 on 09/11/2025.
+
+Seen today for follow-up of hypertension. Blood pressure improved since the
+last visit. Medication list reviewed with the patient and no changes made.
+
+Next appointment scheduled for 10/09/2025.

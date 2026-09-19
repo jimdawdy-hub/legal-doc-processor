@@ -1,0 +1,428 @@
+{
+  "documents": {
+    "discharge_001.txt": [
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Harold Vance",
+        "spans": [
+          [
+            56,
+            68
+          ]
+        ]
+      },
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Dorothy Kimball",
+        "spans": [
+          [
+            646,
+            661
+          ]
+        ]
+      },
+      {
+        "category": "mrn",
+        "safe_harbor": "H",
+        "value": "4417392",
+        "spans": [
+          [
+            92,
+            99
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "03/14/1951",
+        "spans": [
+          [
+            115,
+            125
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "08/02/2025",
+        "spans": [
+          [
+            304,
+            314
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "08/05/2025",
+        "spans": [
+          [
+            331,
+            341
+          ]
+        ]
+      },
+      {
+        "category": "ssn",
+        "safe_harbor": "G",
+        "value": "412-55-9083",
+        "spans": [
+          [
+            150,
+            161
+          ]
+        ]
+      },
+      {
+        "category": "street_address",
+        "safe_harbor": "B",
+        "value": "88 Larkspur Lane",
+        "spans": [
+          [
+            171,
+            187
+          ]
+        ]
+      },
+      {
+        "category": "city",
+        "safe_harbor": "B",
+        "value": "Riverton",
+        "spans": [
+          [
+            194,
+            202
+          ]
+        ]
+      },
+      {
+        "category": "zip",
+        "safe_harbor": "B",
+        "value": "60655",
+        "spans": [
+          [
+            208,
+            213
+          ]
+        ]
+      },
+      {
+        "category": "phone",
+        "safe_harbor": "D",
+        "value": "(312) 555-0147",
+        "spans": [
+          [
+            226,
+            240
+          ]
+        ]
+      },
+      {
+        "category": "fax",
+        "safe_harbor": "E",
+        "value": "(312) 555-0148",
+        "spans": [
+          [
+            246,
+            260
+          ]
+        ]
+      },
+      {
+        "category": "email",
+        "safe_harbor": "F",
+        "value": "hvance@example.net",
+        "spans": [
+          [
+            268,
+            286
+          ]
+        ]
+      },
+      {
+        "category": "age_over_89",
+        "safe_harbor": "C",
+        "value": "91-year-old",
+        "spans": [
+          [
+            358,
+            369
+          ]
+        ]
+      },
+      {
+        "category": "account_number",
+        "safe_harbor": "J",
+        "value": "ACCT-77120934",
+        "spans": [
+          [
+            678,
+            691
+          ]
+        ]
+      }
+    ],
+    "clinic_note_002.txt": [
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Wanda Ferris",
+        "spans": [
+          [
+            53,
+            65
+          ]
+        ]
+      },
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Marcus Oyelaran",
+        "spans": [
+          [
+            184,
+            199
+          ]
+        ]
+      },
+      {
+        "category": "health_plan_id",
+        "safe_harbor": "I",
+        "value": "1EG4TE5MK73",
+        "spans": [
+          [
+            89,
+            100
+          ]
+        ]
+      },
+      {
+        "category": "health_plan_id",
+        "safe_harbor": "I",
+        "value": "GRP-4482",
+        "spans": [
+          [
+            115,
+            123
+          ]
+        ]
+      },
+      {
+        "category": "account_number",
+        "safe_harbor": "J",
+        "value": "88-4410-22",
+        "spans": [
+          [
+            148,
+            158
+          ]
+        ]
+      },
+      {
+        "category": "license_number",
+        "safe_harbor": "K",
+        "value": "1234567893",
+        "spans": [
+          [
+            205,
+            215
+          ]
+        ]
+      },
+      {
+        "category": "license_number",
+        "safe_harbor": "K",
+        "value": "AB1234563",
+        "spans": [
+          [
+            228,
+            237
+          ]
+        ]
+      },
+      {
+        "category": "license_number",
+        "safe_harbor": "K",
+        "value": "IL-036-114829",
+        "spans": [
+          [
+            261,
+            274
+          ]
+        ]
+      },
+      {
+        "category": "email",
+        "safe_harbor": "F",
+        "value": "wferris@example.org",
+        "spans": [
+          [
+            285,
+            304
+          ]
+        ]
+      },
+      {
+        "category": "phone",
+        "safe_harbor": "D",
+        "value": "773-555-0166",
+        "spans": [
+          [
+            311,
+            323
+          ]
+        ]
+      },
+      {
+        "category": "url",
+        "safe_harbor": "N",
+        "value": "https://portal.example-clinic.org/patients/wferris91",
+        "spans": [
+          [
+            340,
+            392
+          ]
+        ]
+      },
+      {
+        "category": "ip_address",
+        "safe_harbor": "O",
+        "value": "203.0.113.47",
+        "spans": [
+          [
+            419,
+            431
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "09/11/2025",
+        "spans": [
+          [
+            435,
+            445
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "10/09/2025",
+        "spans": [
+          [
+            631,
+            641
+          ]
+        ]
+      }
+    ],
+    "device_report_003.txt": [
+      {
+        "category": "name",
+        "safe_harbor": "A",
+        "value": "Cecil Broadwater",
+        "spans": [
+          [
+            75,
+            91
+          ]
+        ]
+      },
+      {
+        "category": "mrn",
+        "safe_harbor": "H",
+        "value": "MRN-8830271",
+        "spans": [
+          [
+            112,
+            123
+          ]
+        ]
+      },
+      {
+        "category": "date",
+        "safe_harbor": "C",
+        "value": "06/18/2025",
+        "spans": [
+          [
+            140,
+            150
+          ]
+        ]
+      },
+      {
+        "category": "device_serial",
+        "safe_harbor": "M",
+        "value": "SN-4471-XQ9920",
+        "spans": [
+          [
+            184,
+            198
+          ]
+        ]
+      },
+      {
+        "category": "device_serial",
+        "safe_harbor": "M",
+        "value": "(01)00819320041234(17)270630(10)LOT4471",
+        "spans": [
+          [
+            211,
+            250
+          ]
+        ]
+      },
+      {
+        "category": "device_serial",
+        "safe_harbor": "M",
+        "value": "ASSET-220417",
+        "spans": [
+          [
+            276,
+            288
+          ]
+        ]
+      },
+      {
+        "category": "vehicle_id",
+        "safe_harbor": "L",
+        "value": "IL PVT-4417",
+        "spans": [
+          [
+            344,
+            355
+          ]
+        ]
+      },
+      {
+        "category": "vehicle_id",
+        "safe_harbor": "L",
+        "value": "1HGCM82633A004352",
+        "spans": [
+          [
+            387,
+            404
+          ]
+        ]
+      },
+      {
+        "category": "other_unique_id",
+        "safe_harbor": "R",
+        "value": "RVT-2025-0431",
+        "spans": [
+          [
+            430,
+            443
+          ]
+        ]
+      }
+    ]
+  }
+}

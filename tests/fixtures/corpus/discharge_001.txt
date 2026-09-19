@@ -1,0 +1,27 @@
+MERCY GENERAL HOSPITAL
+Discharge Summary
+
+Patient Name: Harold Vance
+Medical Record Number: 4417392
+Date of Birth: 03/14/1951
+Social Security Number: 412-55-9083
+Address: 88 Larkspur Lane
+City: Riverton
+ZIP: 60655
+Home Phone: (312) 555-0147
+Fax: (312) 555-0148
+Email: hvance@example.net
+
+Admission Date: 08/02/2025
+Discharge Date: 08/05/2025
+
+Mr. Vance is a 91-year-old man admitted for elective knee arthroplasty.
+Recovery was uneventful and the surgical site remained clean and dry
+throughout the stay. Physical therapy began on the first postoperative day.
+
+Discharged home with outpatient physical therapy follow-up in two weeks.
+
+Attending: Dorothy Kimball
+Account Number: ACCT-77120934
+
+© 2025 Mercy General Hospital
