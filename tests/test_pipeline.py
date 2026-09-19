@@ -223,6 +223,30 @@ def test_public_document_containing_a_signal_identifier_is_quarantined(tmp_dir):
     assert _deliverables(out_dir) == []
 
 
+def test_medical_record_with_a_caselaw_signal_is_held_back(tmp_dir, discharge_base,
+                                                           discharge_ids):
+    """The other half of U2's verification, which U2 could not deliver alone.
+
+    'Second opinion' is ordinary clinical language and fires the same caselaw
+    keyword signal a slip opinion does -- both score 0.30 on the identical
+    signal, so no classifier can separate them. The detector separates them
+    instead (KTD13): this record carries an SSN and a medical record number,
+    an opinion carries only person, date and location.
+    """
+    src = tmp_dir / "note.txt"
+    src.write_text(discharge_base +
+                   "\nPatient sought a second opinion before surgery.\n")
+    out_dir = tmp_dir / "output"
+
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.doc_type == 'caselaw', "fixture no longer reproduces the case"
+    assert result.skipped is True
+    assert result.skip_reason == 'pii_in_public_document'
+    assert _deliverables(out_dir) == []
+    assert discharge_ids['ssn'] not in _read_deliverable_text(out_dir)
+
+
 def test_opinion_with_only_ambient_hits_is_not_quarantined(tmp_dir, caselaw_text):
     """The other half of KTD13. Person, date and location saturate legal text:
     a genuine opinion must pass through untouched, or unconditional detection

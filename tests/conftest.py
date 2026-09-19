@@ -141,6 +141,12 @@ def discharge_text():
 
 
 @pytest.fixture
+def discharge_base():
+    """The discharge summary with no published-lookalike footer."""
+    return DISCHARGE_SUMMARY_BASE
+
+
+@pytest.fixture
 def discharge_ids():
     """The identifiers planted in the discharge-summary fixture."""
     return {
