@@ -8,7 +8,7 @@ from multiprocessing import Lock
 from pathlib import Path
 from typing import Optional
 
-from utils import sha256_file, SUPPORTED_EXTENSIONS
+from utils import anon_id, document_key, sha256_file, SUPPORTED_EXTENSIONS
 from reader import read_file
 from classifier import classify
 from cleaner import clean
@@ -81,13 +81,22 @@ def _select_best_versions(files: list, skip_log: list) -> list:
             seen_hashes[h] = f
             deduped.append(f)
 
-    # Step 2: prefer best format per normalized stem
+    # Step 2: prefer best format per normalized stem, within one directory.
+    #
+    # Grouping on the stem alone reached across folders: two different
+    # clients' 'visit.txt' landed in one group and the second was dropped from
+    # processing entirely, logged as 'superseded_by_better_version'. This step
+    # exists to choose between formats of the same document -- opinion.pdf vs
+    # opinion.txt vs opinion-ocr.pdf -- which are siblings in one directory.
+    # Genuinely identical files in different folders are still collapsed by
+    # the SHA-256 pass above, which is the check that can prove they are the
+    # same document.
     groups = defaultdict(list)
     for f in deduped:
-        groups[_normalize_stem(f)].append(f)
+        groups[(f.parent, _normalize_stem(f))].append(f)
 
     selected = []
-    for stem, group in groups.items():
+    for _, group in groups.items():
         if len(group) == 1:
             selected.append(group[0])
             continue
@@ -180,10 +189,11 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
             write_rag_chunks(chunks, path.name, doc_type, extra, output_dir / 'rag')
 
         if doc_type in ('private', 'uncertain', 'published'):
-            anon_id = f"anon_{abs(hash(path.name)):08d}"
             write_finetune_record(
                 text=text,
-                anon_id=anon_id,
+                anon_id=anon_id(path),
+                doc_key=document_key(path),
+                content_sha256=sha256_file(path),
                 doc_type=doc_type,
                 pii_stripped=doc_type in ('private', 'uncertain'),
                 faker_substitutions=faker_subs,

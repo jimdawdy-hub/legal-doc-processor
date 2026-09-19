@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from utils import sha256_file
+from utils import document_key, sha256_file
 
 
 class ProvenanceManifest:
@@ -62,6 +62,7 @@ class ProvenanceManifest:
     ) -> None:
         sidecar_info = self.sidecar.get(original_path.name, {})
         self._files.append({
+            'doc_key': document_key(original_path),
             'original_filename': original_path.name,
             'source_path': str(original_path.resolve()),
             'sha256': sha256_file(original_path),
@@ -84,8 +85,32 @@ class ProvenanceManifest:
             },
         })
 
+    def _merged_files(self) -> list:
+        """This run's entries merged over any earlier run's (R14).
+
+        The file list used to be replaced wholesale, so a second run over a
+        smaller input directory erased every record of the documents processed
+        before it. Entries are keyed by doc_key: this run replaces what it
+        touched and leaves the rest intact.
+        """
+        if not self.manifest_path.exists():
+            return list(self._files)
+        try:
+            previous = json.loads(self.manifest_path.read_text()).get('files', [])
+        except (json.JSONDecodeError, OSError):
+            return list(self._files)
+
+        merged, order = {}, []
+        for entry in previous + self._files:
+            key = entry.get('doc_key') or entry.get('original_filename')
+            if key not in merged:
+                order.append(key)
+            merged[key] = entry
+        return [merged[k] for k in order]
+
     def save(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._files = self._merged_files()
         processed = [f for f in self._files if not f['skipped']]
         summary = {
             'total_files': len(self._files),

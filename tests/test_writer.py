@@ -41,12 +41,52 @@ def test_rag_id_is_unique_per_chunk(tmp_dir):
     ids = [json.loads(l)["id"] for l in lines]
     assert len(set(ids)) == 3
 
-def test_write_finetune_record_appends(tmp_dir):
+def test_two_documents_produce_two_records(tmp_dir):
     out_file = tmp_dir / "dataset.jsonl"
     write_finetune_record("First doc text.", "anon_001", "private", True, 3, 1, 50, out_file)
     write_finetune_record("Second doc text.", "anon_002", "private", True, 0, 0, 40, out_file)
     lines = out_file.read_text().strip().split('\n')
     assert len(lines) == 2
+
+def test_rewriting_one_document_replaces_its_record(tmp_dir):
+    """R14. Records used to be appended, so every re-run added a
+    byte-identical duplicate of every document already processed."""
+    out_file = tmp_dir / "dataset.jsonl"
+    for text in ("First version.", "Corrected version."):
+        write_finetune_record(text, "anon_001", "private", True, 0, 0, 10, out_file,
+                              doc_key="key-a", content_sha256="sha-a")
+    lines = out_file.read_text().strip().split('\n')
+    assert len(lines) == 1
+    assert json.loads(lines[0])["text"] == "Corrected version."
+
+def test_a_record_edited_downstream_survives_an_unchanged_rerun(tmp_dir):
+    out_file = tmp_dir / "dataset.jsonl"
+    write_finetune_record("Original text.", "anon_001", "private", True, 0, 0, 10,
+                          out_file, doc_key="key-a", content_sha256="sha-a")
+    patched = json.loads(out_file.read_text().strip())
+    patched["text"] = "Hardened [CONDITION] text."
+    out_file.write_text(json.dumps(patched) + '\n')
+
+    write_finetune_record("Original text.", "anon_001", "private", True, 0, 0, 10,
+                          out_file, doc_key="key-a", content_sha256="sha-a")
+
+    assert json.loads(out_file.read_text().strip())["text"] == "Hardened [CONDITION] text."
+
+def test_a_changed_source_overrides_a_downstream_edit(tmp_dir):
+    """The counterweight: protection applies only while the source is
+    unchanged. A corrected document must still be reprocessed."""
+    out_file = tmp_dir / "dataset.jsonl"
+    write_finetune_record("Original text.", "anon_001", "private", True, 0, 0, 10,
+                          out_file, doc_key="key-a", content_sha256="sha-a")
+    patched = json.loads(out_file.read_text().strip())
+    patched["text"] = "Hardened text."
+    out_file.write_text(json.dumps(patched) + '\n')
+
+    write_finetune_record("Text from the corrected source.", "anon_001", "private",
+                          True, 0, 0, 10, out_file,
+                          doc_key="key-a", content_sha256="sha-b")
+
+    assert json.loads(out_file.read_text().strip())["text"] == "Text from the corrected source."
 
 def test_finetune_record_structure(tmp_dir):
     out_file = tmp_dir / "dataset.jsonl"
