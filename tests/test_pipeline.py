@@ -55,3 +55,102 @@ def test_supported_extensions_set():
     assert '.msg' in SUPPORTED_EXTENSIONS
     assert '.docx' in SUPPORTED_EXTENSIONS
     assert '.pptx' in SUPPORTED_EXTENSIONS
+
+
+# --- U2: detection runs on every document, whatever it was classified as -----
+
+def _read_all_output_text(out_dir: Path) -> str:
+    """Every byte the run wrote under output/, concatenated."""
+    if not out_dir.exists():
+        return ''
+    return '\n'.join(
+        p.read_text(errors='replace')
+        for p in out_dir.rglob('*') if p.is_file()
+    )
+
+
+@pytest.mark.parametrize('footer', ['copyright', 'bar_association', 'issn'])
+def test_medical_record_with_published_lookalike_is_scrubbed(
+    tmp_dir, discharge_text, discharge_ids, footer
+):
+    """The headline defect: one copyright / Bar Association / ISSN line used to
+    classify a discharge summary as 'published', and published skipped the
+    scrubber, so the record was written out with the SSN intact."""
+    src = tmp_dir / "discharge_summary.txt"
+    src.write_text(discharge_text(footer))
+    out_dir = tmp_dir / "output"
+
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.pii_stripped is True, (
+        f"classified {result.doc_type!r} and skipped the scrubber"
+    )
+    assert discharge_ids['ssn'] not in _read_all_output_text(out_dir)
+
+
+def test_detection_runs_for_every_doc_type(tmp_dir, monkeypatch, discharge_text):
+    """Assert on the detection call, not on the output: caselaw and published
+    documents are not redacted, but they must still be looked at."""
+    import pipeline
+
+    seen = []
+    real_strip_pii = pipeline.strip_pii
+
+    def spy(text, source_filename, output_mode='finetune'):
+        seen.append(source_filename)
+        return real_strip_pii(text, source_filename, output_mode=output_mode)
+
+    monkeypatch.setattr(pipeline, 'strip_pii', spy)
+
+    samples = {
+        'caselaw': "Smith v. Jones, 123 F.3d 456 (7th Cir. 2019)\n\nOPINION\n\nAFFIRMED.\n",
+        'published': ("Chicago Bar Journal\nVol. 42, No. 3 - ISSN 0009-3157\n"
+                      "Continuing Legal Education\n© 2023 Chicago Bar Association\n"),
+        'uncertain': "Just some text with no legal signals at all.\n",
+        'private': discharge_text('copyright'),
+    }
+    for name, text in samples.items():
+        src = tmp_dir / f"{name}.txt"
+        src.write_text(text)
+        process_file(src, tmp_dir / "output", dry_run=True)
+
+    assert sorted(seen) == sorted(f"{n}.txt" for n in samples)
+
+
+def test_caselaw_passes_through_unredacted(tmp_dir, caselaw_text):
+    """Detection running on an opinion must not start redacting it. The corpus
+    job depends on party names and citations surviving verbatim."""
+    src = tmp_dir / "smith_v_jones.txt"
+    src.write_text(caselaw_text)
+    out_dir = tmp_dir / "output"
+
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.doc_type == 'caselaw'
+    assert result.pii_stripped is False
+    assert result.faker_substitutions == 0
+    rag = out_dir / "rag" / "smith_v_jones.jsonl"
+    assert rag.exists(), "a caselaw document must still produce RAG output"
+    written = '\n'.join(json.loads(l)['text'] for l in rag.read_text().splitlines())
+    for verbatim in ("Smith v. Jones", "123 F.3d 456", "AFFIRMED"):
+        assert verbatim in written
+
+
+def test_slip_opinion_still_gets_rag_output(tmp_dir):
+    """A court opinion whose only caselaw signal is the OPINION/AFFIRMED keyword
+    must stay caselaw -- 'uncertain' would scrub it and drop it from the corpus."""
+    src = tmp_dir / "slip_opinion.txt"
+    src.write_text(
+        "IN THE APPELLATE COURT OF ILLINOIS\n"
+        "FIRST JUDICIAL DISTRICT\n\n"
+        "OPINION\n\n"
+        "Justice Elena Marsh delivered the judgment of the court.\n"
+        "The circuit court's order is AFFIRMED.\n"
+    )
+    out_dir = tmp_dir / "output"
+
+    result = process_file(src, out_dir, dry_run=False)
+
+    assert result.doc_type == 'caselaw'
+    assert result.pii_stripped is False
+    assert (out_dir / "rag" / "slip_opinion.jsonl").exists()

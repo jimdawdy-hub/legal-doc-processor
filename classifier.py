@@ -34,6 +34,33 @@ PRIVATE_SIGNALS = [
 ]
 
 
+# The most any one category can score if every one of its signals fires.
+# Confidence is reported as a share of this, so it stays comparable across
+# categories and a lone weak signal can no longer normalise to a certainty.
+ACHIEVABLE = {
+    'caselaw': sum(w for _, w in CASELAW_SIGNALS),      # 0.90
+    'published': sum(w for _, w in PUBLISHED_SIGNALS),  # 1.10
+    'private': sum(w for _, w in PRIVATE_SIGNALS),      # 1.90
+}
+
+# Minimum raw evidence before a category is claimed at all. These are per
+# category on purpose: the achievable totals above differ by more than 2x, so
+# one shared cutoff would mean something different in each.
+#
+#   caselaw   0.30 — either signal is decisive alone. A reporter citation or
+#                    the OPINION/AFFIRMED vocabulary means a court wrote it.
+#   private   0.40 — an email header block is decisive; nothing weaker is.
+#   published 0.50 — no single published signal is decisive. A copyright line,
+#                    an ISSN and the words "Bar Association" are all ordinary
+#                    furniture on medical paperwork, which is how a discharge
+#                    summary came to read as 'published' at 100% confidence and
+#                    skip the scrubber. Two signals required.
+#
+# Falling short lands in 'uncertain', which is scrubbed — so the failure
+# direction of every threshold here is the safe one.
+MIN_EVIDENCE = {'caselaw': 0.30, 'published': 0.50, 'private': 0.40}
+
+
 def classify(path: Path, text: str) -> ClassifyResult:
     """Classify a document by type from its extension and content.
 
@@ -71,11 +98,12 @@ def classify(path: Path, text: str) -> ClassifyResult:
     if total == 0:
         return ClassifyResult('uncertain', 0.0, {'scores': scores, 'fired': fired})
 
-    norm = {k: v / total for k, v in scores.items()}
-    best_type = max(norm, key=norm.__getitem__)
-    best_confidence = norm[best_type]
+    norm = {k: v / ACHIEVABLE[k] for k, v in scores.items()}
+    qualified = [k for k, v in scores.items() if v >= MIN_EVIDENCE[k]]
 
-    if best_confidence < 0.60:
-        return ClassifyResult('uncertain', best_confidence, {'scores': scores, 'fired': fired})
+    if not qualified:
+        weak = max(norm, key=norm.__getitem__)
+        return ClassifyResult('uncertain', norm[weak], {'scores': scores, 'fired': fired})
 
-    return ClassifyResult(best_type, best_confidence, {'scores': scores, 'fired': fired})
+    best_type = max(qualified, key=lambda k: norm[k])
+    return ClassifyResult(best_type, norm[best_type], {'scores': scores, 'fired': fired})

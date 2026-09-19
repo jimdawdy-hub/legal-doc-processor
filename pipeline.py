@@ -144,18 +144,23 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
     doc_type = classify_result.doc_type
     text = clean(read_result.text)
 
-    pii_result = None
-    if doc_type in ('private', 'uncertain'):
-        pii_result = strip_pii(text, path.name, output_mode='finetune')
+    # KTD5: detection runs on every document, whatever it was classified as.
+    # Classification decides how a document is treated; it no longer decides
+    # whether identifiers are looked for at all. Replacement stays limited to
+    # private/uncertain here -- U7 adjudicates what a detection in a public
+    # document means (quarantine), which is why pii.py never sees doc_type.
+    pii_result = strip_pii(text, path.name, output_mode='finetune')
+    redacted = doc_type in ('private', 'uncertain')
+    if redacted:
         text = pii_result.text
 
-    faker_subs = pii_result.substitutions if pii_result else 0
-    flag_count = len(pii_result.review_flags) if pii_result else 0
+    faker_subs = pii_result.substitutions if redacted else 0
+    flag_count = len(pii_result.review_flags) if redacted else 0
     chunks = chunk(text, doc_type)
     token_count = sum(c.token_count for c in chunks)
 
     if not dry_run:
-        if pii_result and pii_result.review_flags:
+        if redacted and pii_result.review_flags:
             review_log = output_dir / 'review' / 'review_log.jsonl'
             review_log.parent.mkdir(parents=True, exist_ok=True)
             lock = _get_write_lock()

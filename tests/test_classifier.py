@@ -50,3 +50,42 @@ def test_signals_dict_populated(caselaw_text):
     result = classify(Path("opinion.pdf"), caselaw_text)
     assert "scores" in result.signals
     assert result.signals["scores"]["caselaw"] > 0
+
+
+# --- U2: a single weak signal must not carry a whole classification ----------
+# Confidence used to be each category's share of the score that actually fired,
+# so one signal firing alone normalised to 1.00 no matter how weak it was. A
+# copyright footer on a discharge summary therefore read as "published, 100%",
+# and published documents never reached the scrubber.
+
+@pytest.mark.parametrize('footer', ['copyright', 'bar_association', 'issn'])
+def test_single_published_signal_does_not_classify_published(discharge_text, footer):
+    result = classify(Path("discharge_summary.pdf"), discharge_text(footer))
+    assert result.doc_type != "published", (
+        f"a lone {footer!r} line classified a medical record as published "
+        f"at {result.confidence:.2f} confidence, routing it around the scrubber"
+    )
+
+def test_single_weak_published_signal_reports_low_confidence(discharge_text):
+    # The copyright footer is the weakest published signal there is (0.20).
+    result = classify(Path("discharge_summary.pdf"), discharge_text('copyright'))
+    assert result.confidence < 0.60
+
+def test_confidence_is_share_of_what_the_category_could_score(published_text):
+    # A law review article firing every published signal is the only thing that
+    # should read as a certainty.
+    result = classify(Path("cle_article.pdf"), published_text)
+    assert result.doc_type == "published"
+    assert result.confidence == pytest.approx(1.00, abs=0.01)
+
+def test_opinion_keyword_alone_still_classifies_caselaw():
+    # A slip opinion with no reporter citation yet. Demoting this to 'uncertain'
+    # would scrub the judges' and parties' names out of the case-law corpus.
+    text = (
+        "IN THE APPELLATE COURT OF ILLINOIS\n"
+        "FIRST JUDICIAL DISTRICT\n\n"
+        "OPINION\n\n"
+        "The circuit court's order is AFFIRMED.\n"
+    )
+    result = classify(Path("slip_opinion.pdf"), text)
+    assert result.doc_type == "caselaw"

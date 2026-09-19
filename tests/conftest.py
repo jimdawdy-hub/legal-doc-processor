@@ -66,6 +66,70 @@ Sincerely,
 James Kowalski
 """
 
+# --- Medical record fixtures -------------------------------------------------
+# Invented from scratch. Nothing below is derived from, or adapted from, a real
+# patient record: this repository has a public remote (plan Q3), so every value
+# here is made up and must stay that way.
+
+DISCHARGE_SSN = "412-55-9083"
+DISCHARGE_MRN = "4417392"
+DISCHARGE_NAME = "Harold Vance"
+DISCHARGE_DOB = "03/14/1951"
+DISCHARGE_ADDRESS = "88 Larkspur Lane"
+DISCHARGE_ZIP = "60655"
+DISCHARGE_PHONE = "(312) 555-0147"
+
+DISCHARGE_SUMMARY_BASE = f"""MERCY GENERAL HOSPITAL
+Discharge Summary
+
+Patient Name: {DISCHARGE_NAME}
+Medical Record Number: {DISCHARGE_MRN}
+Date of Birth: {DISCHARGE_DOB}
+Social Security Number: {DISCHARGE_SSN}
+Address: {DISCHARGE_ADDRESS}, Riverton, IL {DISCHARGE_ZIP}
+Phone: {DISCHARGE_PHONE}
+
+Admitted 08/02/2025 for elective knee arthroplasty. Recovery was uneventful
+and the surgical site remained clean and dry throughout the stay.
+
+Discharged home 08/05/2025 with physical therapy follow-up in two weeks.
+"""
+
+# Each of these lines, on its own, is enough to classify the record above as a
+# published document -- which used to route it around the scrubber entirely.
+# All three are ordinary furniture on real medical paperwork.
+PUBLISHED_LOOKALIKE_FOOTERS = {
+    'copyright': "© 2025 Mercy General Hospital",
+    'bar_association': "Health fair co-hosted with the Cook County Bar Association.",
+    'issn': "Patient Education Series - ISSN: 1234-5678",
+}
+
+
+def discharge_summary(footer: str = 'copyright') -> str:
+    """A synthetic discharge summary carrying one published-lookalike line."""
+    return f"{DISCHARGE_SUMMARY_BASE}\n{PUBLISHED_LOOKALIKE_FOOTERS[footer]}\n"
+
+
+@pytest.fixture
+def discharge_text():
+    """Factory: discharge_text(footer) -> a synthetic discharge summary."""
+    return discharge_summary
+
+
+@pytest.fixture
+def discharge_ids():
+    """The identifiers planted in the discharge-summary fixture."""
+    return {
+        'name': DISCHARGE_NAME,
+        'mrn': DISCHARGE_MRN,
+        'dob': DISCHARGE_DOB,
+        'ssn': DISCHARGE_SSN,
+        'address': DISCHARGE_ADDRESS,
+        'zip': DISCHARGE_ZIP,
+        'phone': DISCHARGE_PHONE,
+    }
+
+
 @pytest.fixture
 def tmp_dir():
     with tempfile.TemporaryDirectory() as d:
