@@ -17,9 +17,13 @@ def _write_sidecar(tmp_dir: Path) -> Path:
         })
     return sidecar
 
-def _add_sample_file(manifest: ProvenanceManifest, filename: str = "opinion.pdf", **kwargs):
+def _add_sample_file(manifest: ProvenanceManifest, tmp_dir: Path,
+                     filename: str = "opinion.pdf", **kwargs):
+    # add_file hashes the source file, so the fixture has to put one on disk.
+    source = tmp_dir / filename
+    source.write_bytes(f"contents of {filename}".encode())
     defaults = dict(
-        original_path=Path(filename),
+        original_path=source,
         doc_type='caselaw',
         classification_confidence=0.91,
         ocr=False,
@@ -35,7 +39,7 @@ def _add_sample_file(manifest: ProvenanceManifest, filename: str = "opinion.pdf"
 
 def test_save_creates_provenance_json(tmp_dir):
     m = ProvenanceManifest(tmp_dir)
-    _add_sample_file(m)
+    _add_sample_file(m, tmp_dir)
     m.save()
     assert (tmp_dir / 'provenance.json').exists()
 
@@ -48,20 +52,20 @@ def test_provenance_has_dataset_level_fields(tmp_dir):
 
 def test_provenance_preserves_dataset_fields_on_rerun(tmp_dir):
     m = ProvenanceManifest(tmp_dir)
-    _add_sample_file(m)
+    _add_sample_file(m, tmp_dir)
     m.save()
     data = json.loads((tmp_dir / 'provenance.json').read_text())
     data['dataset_name'] = 'My Legal Dataset'
     (tmp_dir / 'provenance.json').write_text(json.dumps(data))
     m2 = ProvenanceManifest(tmp_dir)
-    _add_sample_file(m2, "second.pdf")
+    _add_sample_file(m2, tmp_dir, "second.pdf")
     m2.save()
     data2 = json.loads((tmp_dir / 'provenance.json').read_text())
     assert data2['dataset_name'] == 'My Legal Dataset'
 
 def test_provenance_per_file_record_structure(tmp_dir):
     m = ProvenanceManifest(tmp_dir)
-    _add_sample_file(m)
+    _add_sample_file(m, tmp_dir)
     m.save()
     data = json.loads((tmp_dir / 'provenance.json').read_text())
     record = data['files'][0]
@@ -91,11 +95,23 @@ def test_sidecar_populates_copyright_fields(tmp_dir):
 
 def test_summary_counts_are_correct(tmp_dir):
     m = ProvenanceManifest(tmp_dir)
-    _add_sample_file(m, 'case1.pdf', doc_type='caselaw')
-    _add_sample_file(m, 'case2.pdf', doc_type='caselaw')
-    _add_sample_file(m, 'email.pdf', doc_type='private', pii_stripped=True, faker_substitutions=3)
+    _add_sample_file(m, tmp_dir, 'case1.pdf', doc_type='caselaw')
+    _add_sample_file(m, tmp_dir, 'case2.pdf', doc_type='caselaw')
+    _add_sample_file(m, tmp_dir, 'email.pdf', doc_type='private', pii_stripped=True, faker_substitutions=3)
     m.save()
     data = json.loads((tmp_dir / 'provenance.json').read_text())
     assert data['summary']['caselaw_files'] == 2
     assert data['summary']['private_files'] == 1
     assert data['summary']['total_files'] == 3
+
+def test_add_file_still_raises_on_missing_source(tmp_dir):
+    """The fixture was wrong, not add_file: hashing a file that is not there
+    must still fail loudly rather than record an entry with no real hash."""
+    m = ProvenanceManifest(tmp_dir)
+    with pytest.raises(FileNotFoundError):
+        m.add_file(
+            original_path=tmp_dir / 'never_written.pdf',
+            doc_type='caselaw', classification_confidence=0.91,
+            ocr=False, ocr_confidence=None, pii_stripped=False,
+            faker_substitutions=0, review_flags=0, chunk_count=1, token_count=10,
+        )
