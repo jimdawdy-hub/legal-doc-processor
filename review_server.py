@@ -1,143 +1,113 @@
 #!/usr/bin/env python3
-"""
-Local review server for the legal-doc-processor pipeline.
-Serves summary.html and applies decisions without manual CSV handling.
-
-Usage:
-    python3.12 review_server.py --output /path/to/output [--port 8765]
-
-Workflow:
-    1. Run this script — browser opens automatically
-    2. Click through decisions in the browser
-    3. Enter your name in the reviewer field
-    4. Click "Apply Decisions" — server patches the dataset and writes the audit record
-    5. Ctrl+C to stop the server when done
-"""
-
-import csv
+"""Private, loopback-only browser review of local legal-document outputs."""
+import argparse
+import hmac
 import json
-import sys
-import threading
+import secrets
 import webbrowser
-from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-sys.path.insert(0, str(Path(__file__).parent))
+from apply_decisions import apply_review
+from utils import write_json
 
-from apply_decisions import build_exclusion_map, reprocess_file
-from reporter import generate_reports
+MAX_BODY = 10 * 1024 * 1024
 
 
 class ReviewHandler(BaseHTTPRequestHandler):
-    output_dir: Path = None
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
+
+    @property
+    def output_dir(self):
+        return self.server.output_dir
+
+    def _allowed_origin(self):
+        hosts = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        origin = self.headers.get('Origin')
+        return (self.headers.get('Host') in hosts
+                and (origin is None or origin in {'http://' + host for host in hosts}))
+
+    def _authenticated(self):
+        try:
+            cookie = SimpleCookie(self.headers.get('Cookie', ''))
+            value = cookie['review_session'].value if 'review_session' in cookie else ''
+            return hmac.compare_digest(value, self.server.review_token)
+        except Exception:
+            return False
 
     def do_GET(self):
+        if not self._allowed_origin():
+            self.send_error(403)
+            return
+        parsed = urlsplit(self.path)
+        token = parse_qs(parsed.query).get('token', [''])[0]
+        if parsed.path == '/' and token and hmac.compare_digest(token, self.server.review_token):
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.send_header('Set-Cookie', 'review_session=' + token + '; HttpOnly; SameSite=Strict; Path=/')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        if not self._authenticated():
+            self.send_error(401)
+            return
         if self.path in ('/', '/summary.html'):
             self._serve_file(self.output_dir / 'summary.html', 'text/html; charset=utf-8')
         elif self.path == '/status':
-            self._json({'server': True, 'output_dir': str(self.output_dir)})
+            self._json({'server': True, 'review_token': self.server.review_token})
         elif self.path == '/provenance':
             self._serve_file(self.output_dir / 'provenance.json', 'application/json')
         else:
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == '/apply':
-            length = int(self.headers.get('Content-Length', 0))
-            body = json.loads(self.rfile.read(length))
-            try:
-                result = self._apply(body)
-                self._json(result)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                self._json({'error': str(e)}, 500)
-        else:
+        self.close_connection = True
+        if not self._allowed_origin() or not self._authenticated():
+            self.send_error(403)
+            return
+        if self.path != '/apply':
             self.send_error(404)
+            return
+        if not hmac.compare_digest(self.headers.get('X-Review-Token', ''), self.server.review_token):
+            self.send_error(403)
+            return
+        if self.headers.get('Transfer-Encoding') or self.headers.get_content_type() != 'application/json':
+            self.send_error(400)
+            return
+        try:
+            length = int(self.headers.get('Content-Length', '-1'))
+            if not 0 <= length <= MAX_BODY:
+                self.send_error(413)
+                return
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError('Incomplete request')
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError('Expected an object')
+            result = apply_review(self.output_dir, body.get('decisions'), body.get('reviewer'))
+        except (ValueError, TypeError, KeyError, UnicodeDecodeError):
+            self._json({'error': 'Invalid or stale review decisions; refresh and check the local batch.'}, 400)
+            return
+        except (OSError, RuntimeError):
+            self._json({'error': 'Local review failed; inspect the batch before retrying.'}, 500)
+            return
+        self._json(result)
 
-    def _apply(self, body):
-        decisions = body.get('decisions', [])
-        reviewer = body.get('reviewer', '').strip()
-
-        restores = [d for d in decisions if d.get('decision') == 'restore']
-        approves  = [d for d in decisions if d.get('decision') != 'restore']
-
-        timestamp = datetime.now(timezone.utc).isoformat()
-        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-
-        # Load provenance first so we know where the source case folder is
-        provenance_path = self.output_dir / 'provenance.json'
-        provenance = json.loads(provenance_path.read_text()) if provenance_path.exists() else {}
-
-        # Archive decisions CSV to the source case folder (not the derived dataset folder)
-        source_dir = provenance.get('source_dir')
-        if source_dir and Path(source_dir).exists():
-            audit_dir = Path(source_dir) / 'audit'
-        else:
-            audit_dir = self.output_dir / 'review'
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        archived = audit_dir / f'decisions-{stamp}.csv'
-        fieldnames = ['flag_id', 'file', 'entity_type', 'original_text', 'confidence', 'decision']
-        with open(archived, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-            writer.writeheader()
-            for d in decisions:
-                writer.writerow(d)
-
-        print(f"\n  Reviewer: {reviewer or '(unnamed)'}")
-        print(f"  Decisions: {len(approves)} keep-redacted, {len(restores)} restore")
-        print(f"  Archived to: {archived}")
-
-        audit_entry = {
-            'reviewed_at': timestamp,
-            'reviewer': reviewer,
-            'decisions_file': str(archived),
-            'total_flags_reviewed': len(decisions),
-            'approved_keep_redacted': len(approves),
-            'restored_original': len(restores),
-        }
-        provenance.setdefault('human_reviews', []).append(audit_entry)
-
-        files_changed = 0
-        if restores:
-            exclusion_map = build_exclusion_map(restores)
-            print(f"  Re-processing {len(exclusion_map)} file(s)...")
-            updated = []
-            for rec in provenance.get('files', []):
-                fname = rec['original_filename']
-                if fname in exclusion_map:
-                    src = Path(rec.get('source_path', ''))
-                    if src.exists():
-                        rec = reprocess_file(src, exclusion_map[fname], self.output_dir, rec)
-                        files_changed += 1
-                    else:
-                        print(f"  WARNING: source not found: {src}")
-                updated.append(rec)
-            provenance['files'] = updated
-            provenance['summary']['pii_review_flags'] = sum(
-                r.get('processing', {}).get('review_flags', 0)
-                for r in updated if not r.get('skipped')
-            )
-
-        provenance_path.write_text(json.dumps(provenance, indent=2))
-        print("  Regenerating reports...")
-        generate_reports(self.output_dir)
-        print("  Done.\n")
-
-        return {
-            'ok': True,
-            'reviewed_at': timestamp,
-            'reviewer': reviewer,
-            'approved': len(approves),
-            'restored': len(restores),
-            'files_reprocessed': files_changed,
-            'decisions_file': archived.name,
-        }
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        super().end_headers()
 
     def _serve_file(self, path, content_type):
         try:
-            content = Path(path).read_bytes()
+            content = path.read_bytes()
         except FileNotFoundError:
             self.send_error(404)
             return
@@ -151,45 +121,39 @@ class ReviewHandler(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, fmt, *args):
-        # Suppress per-request noise except errors
-        if args and str(args[1]) not in ('200', '204'):
-            print(f"  [{self.address_string()}] {fmt % args}")
+    def log_request(self, *args):
+        pass  # Never log bootstrap query strings or document identifiers.
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Serve the pipeline review UI locally.')
-    parser.add_argument('--output', required=True, type=Path,
-                        help='Pipeline output directory containing summary.html')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--no-open', action='store_true')
     args = parser.parse_args()
-
-    html_path = args.output / 'summary.html'
-    if not html_path.exists():
-        print(f"Error: {html_path} not found. Run the pipeline first.", file=sys.stderr)
-        sys.exit(1)
-
-    ReviewHandler.output_dir = args.output.resolve()
-    server = HTTPServer(('localhost', args.port), ReviewHandler)
-    url = f'http://localhost:{args.port}/'
-
-    print(f"Legal Doc Processor — Review Server")
-    print(f"  URL:    {url}")
-    print(f"  Output: {args.output.resolve()}")
-    print(f"  Press Ctrl+C to stop.\n")
-
-    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
-
+    if not (args.output / 'summary.html').is_file():
+        parser.error('Run the local pipeline first; summary.html is missing')
+    server = HTTPServer(('127.0.0.1', args.port), ReviewHandler)
+    server.output_dir = args.output.resolve()
+    server.review_token = secrets.token_urlsafe(32)
+    url = f'http://127.0.0.1:{server.server_port}/?token={server.review_token}'
+    session_path = server.output_dir / 'review' / f'.browser-session-{server.server_port}.json'
+    write_json(session_path, {'url': url})
+    print(f'Local review server on 127.0.0.1:{server.server_port}')
+    print(f'Private browser link saved to {session_path} (keep this file local).')
+    if not args.no_open:
+        webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nServer stopped.")
+        pass
+    finally:
+        server.server_close()
+        session_path.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':

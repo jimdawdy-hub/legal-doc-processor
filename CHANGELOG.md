@@ -7,14 +7,36 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.4.0] — 2026-06-14
+## [0.3.0] — 2026-11-10
+
+The previous published release was v0.2.0. The pre-existing v0.4.0 development tag is retained unchanged; v0.3.0 is the new published release.
+
+### Changed
+
+- Standalone, provider-neutral tool; removed assistant-skill packaging and the provider SDK dependency.
+- Mandatory reviewed AI endpoint/model policy: Business/Enterprise-level agreement, no training on user data, and ZDR enabled when required. Explicit upload confirmation remains required.
+- Redact all document classes by default with typed markers; public-text preservation and synthetic values are explicit options.
+- Stable opaque dataset IDs and actual text chunks for every document class; reject overlapping/nonempty output directories.
+- Deduplicate identical bytes only; retain distinct files with matching names/formats.
+
+### Fixed
+
+- Overlapping PII tails and detection-window boundary misses; supplement labeled medical/case identifiers and fail closed for unparseable dates or unavailable OCR confidence.
+- Script injection in generated review HTML; private output permissions and atomic file replacement.
+- Authenticated, loopback-only review UI with bounded requests, host/origin validation, and session/CSRF protection.
+- Stable review-to-dataset matching, validated decisions, shared CLI/server audit handling, and protection against restores undoing second-pass redactions.
+- Malformed/failed/partial AI assessments no longer imply LOW overall risk; retry exact chunks and reject stale reports.
+- Regenerated reports retain assessment status; second-pass replacements preserve literal slashes/backslashes and update token metadata.
+- Preserve numbered/substantive repeated lines, finish manifests for batches containing corrupt files, and repair four baseline test fixtures that referenced nonexistent files.
+
+## [0.4.0] — 2026-06-14 (historical development tag)
 
 ### Added
 
 - **Legal disclaimer** — Added prominent disclaimer to README stating that AI makes mistakes and the user is solely responsible for verifying all output is PII-free before use.
 - **`utils.py`** — Shared module for `sha256_file()` and `SUPPORTED_EXTENSIONS`, eliminating duplication between `pipeline.py`, `provenance.py`, and `reader.py`.
 - **Overlap-safe PII replacement** — `pii.py` now deduplicates overlapping Presidio entities before applying Faker substitutions, preventing offset corruption when Presidio returns overlapping spans.
-- **Configurable Claude model** — `re_id_risk.py` accepts `--model` flag and `RE_ID_MODEL` env var (default: `claude-opus-4-7`), allowing cost-sensitive users to use cheaper models.
+- **Configurable assessment model** — `re_id_risk.py` accepts `--model` flag and `RE_ID_MODEL` env var (default: `claude-opus-4-7`), allowing cost-sensitive users to use cheaper models.
 - **Concurrency locking** — `pipeline.py` uses `multiprocessing.Lock` to protect shared file writes (`review_log.jsonl`, `dataset.jsonl`) when `--workers > 1`.
 
 ### Changed
@@ -29,7 +51,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.3.0] — 2026-05-17
+## Red-team development notes — 2026-05-17 (not a published release)
 
 ### Added
 
@@ -37,7 +59,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`requirements.txt`** — Added `anthropic>=0.68.0` for the Claude API SDK.
+- **`requirements.txt`** — Added `anthropic>=0.68.0` for the original provider API SDK.
 - **`SKILL.md`** — Documented `re_id_risk.py` in the post-run checklist and added interactive review commands.
 
 ---
@@ -90,11 +112,11 @@ Initial release.
 
 - **`process.py`** — CLI entry point. Flags: `--input`, `--output`, `--dry-run`, `--workers`, `--sidecar`.
 
-- **`SKILL.md`** — OpenClaw agent instruction file with usage, output layout, PII threshold table, and post-run checklist.
+- **`SKILL.md`** — Legacy assistant-specific instruction file with usage, output layout, PII threshold table, and post-run checklist.
 
 - **56 pytest tests** covering all modules.
 
-[0.4.0]: https://github.com/jimdawdy-hub/legal-doc-processor/compare/v0.3.0...v0.4.0
+[0.4.0]: https://github.com/jimdawdy-hub/legal-doc-processor/compare/v0.2.0...v0.4.0
 [0.3.0]: https://github.com/jimdawdy-hub/legal-doc-processor/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jimdawdy-hub/legal-doc-processor/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jimdawdy-hub/legal-doc-processor/releases/tag/v0.1.0

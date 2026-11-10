@@ -1,14 +1,13 @@
 import json
 import re
 import shutil
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import Lock
 from pathlib import Path
 from typing import Optional
 
-from utils import sha256_file, SUPPORTED_EXTENSIONS
+from utils import sha256_file, SUPPORTED_EXTENSIONS, document_id, private_append
 from reader import read_file
 from classifier import classify
 from cleaner import clean
@@ -17,11 +16,6 @@ from chunker import chunk
 from writer import write_rag_chunks, write_finetune_record
 from provenance import ProvenanceManifest
 from reporter import generate_reports
-
-# Priority when multiple versions of the same document exist.
-# Lower number = higher priority (will be processed; others skipped).
-_EXT_PRIORITY = {'.txt': 0, '.pdf': 1, '.docx': 2, '.pptx': 3, '.eml': 4, '.msg': 5}
-
 
 _write_lock: Optional[Lock] = None
 
@@ -35,77 +29,22 @@ def _get_write_lock() -> Optional[Lock]:
     return _write_lock
 
 
-_OCR_SUFFIXES = ('.ocr', '-ocr', '_ocr', '-ocr.pdf', ' searchable copy')
-
-
-def _normalize_stem(path: Path) -> str:
-    """Strip OCR suffixes to get the canonical document name for grouping."""
-    stem = path.stem
-    for suffix in _OCR_SUFFIXES:
-        if stem.lower().endswith(suffix):
-            stem = stem[:len(stem) - len(suffix)]
-    return stem.lower().strip()
-
-
-def _is_ocr_version(path: Path) -> bool:
-    """True if this file is an OCR-processed version of a scanned original."""
-    stem_lower = path.stem.lower()
-    return any(stem_lower.endswith(s) for s in _OCR_SUFFIXES)
-
-
 def _select_best_versions(files: list, skip_log: list) -> list:
-    """
-    Given all candidate files, return one best version per unique document.
-
-    Rules (applied in order):
-    1. Exact SHA-256 duplicates → keep one (smallest path alphabetically), skip rest.
-    2. Same document, multiple formats → prefer by _EXT_PRIORITY
-       (.txt beats .ocr.pdf beats .pdf, etc.)
-    """
-    # Step 1: deduplicate by SHA-256
+    """Deduplicate identical bytes only; filenames do not establish equivalence."""
     seen_hashes = {}
-    deduped = []
-    for f in sorted(files):
-        try:
-            h = sha256_file(f)
-        except OSError:
-            deduped.append(f)
-            continue
-        if h in seen_hashes:
-            skip_log.append({
-                'path': str(f),
-                'reason': 'exact_duplicate',
-                'duplicate_of': str(seen_hashes[h]),
-            })
-        else:
-            seen_hashes[h] = f
-            deduped.append(f)
-
-    # Step 2: prefer best format per normalized stem
-    groups = defaultdict(list)
-    for f in deduped:
-        groups[_normalize_stem(f)].append(f)
-
     selected = []
-    for stem, group in groups.items():
-        if len(group) == 1:
-            selected.append(group[0])
+    for path in sorted(files):
+        try:
+            digest = sha256_file(path)
+        except OSError:
+            selected.append(path)
             continue
-        # Sort by extension priority, then path length (prefer shorter paths = root over subdir)
-        best = sorted(group, key=lambda f: (
-            _EXT_PRIORITY.get(f.suffix.lower(), 99),
-            0 if _is_ocr_version(f) else 1,  # OCR PDF beats non-OCR PDF
-            len(str(f)),
-        ))[0]
-        selected.append(best)
-        for other in group:
-            if other != best:
-                skip_log.append({
-                    'path': str(other),
-                    'reason': 'superseded_by_better_version',
-                    'superseded_by': str(best),
-                })
-
+        if digest in seen_hashes:
+            skip_log.append({'path': str(path), 'reason': 'exact_duplicate',
+                             'duplicate_of': str(seen_hashes[digest])})
+        else:
+            seen_hashes[digest] = path
+            selected.append(path)
     return selected
 
 
@@ -125,14 +64,17 @@ class ProcessResult:
     skip_reason: Optional[str] = None
 
 
-def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> ProcessResult:
+def process_file(path: Path, output_dir: Path, dry_run: bool = False,
+                 preserve_public_text: bool = False, replacement: str = 'tokens') -> ProcessResult:
     read_result = read_file(path)
 
     if read_result is None:
         if not dry_run:
             ocr_q = output_dir / 'review' / 'ocr_queue'
-            ocr_q.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, ocr_q / path.name)
+            ocr_q.mkdir(parents=True, exist_ok=True, mode=0o700)
+            queued = ocr_q / (document_id(path) + path.suffix.lower())
+            shutil.copy2(path, queued)
+            queued.chmod(0o600)
         return ProcessResult(
             path=path, doc_type='unknown', classification_confidence=0.0,
             ocr=True, ocr_confidence=None, pii_stripped=False,
@@ -145,8 +87,10 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
     text = clean(read_result.text)
 
     pii_result = None
-    if doc_type in ('private', 'uncertain'):
-        pii_result = strip_pii(text, path.name, output_mode='finetune')
+    redact = not (preserve_public_text and doc_type in ('caselaw', 'published'))
+    if redact and not dry_run:
+        pii_result = strip_pii(text, document_id(path),
+                               output_mode='finetune' if replacement == 'synthetic' else 'rag')
         text = pii_result.text
 
     faker_subs = pii_result.substitutions if pii_result else 0
@@ -161,32 +105,31 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
             lock = _get_write_lock()
             if lock:
                 with lock:
-                    with open(review_log, 'a') as f:
+                    with private_append(review_log) as f:
                         for flag in pii_result.review_flags:
                             f.write(json.dumps(flag) + '\n')
             else:
-                with open(review_log, 'a') as f:
+                with private_append(review_log) as f:
                     for flag in pii_result.review_flags:
                         f.write(json.dumps(flag) + '\n')
 
         if doc_type in ('caselaw', 'published'):
-            extra = _caselaw_meta(text) if doc_type == 'caselaw' else {}
+            extra = _caselaw_meta(text) if doc_type == 'caselaw' and not redact else {}
             extra['ocr'] = read_result.ocr
-            write_rag_chunks(chunks, path.name, doc_type, extra, output_dir / 'rag')
+            extra['pii_stripped'] = redact
+            write_rag_chunks(chunks, document_id(path), doc_type, extra, output_dir / 'rag')
 
-        if doc_type in ('private', 'uncertain', 'published'):
-            anon_id = f"anon_{abs(hash(path.name)):08d}"
-            write_finetune_record(
-                text=text,
-                anon_id=anon_id,
-                doc_type=doc_type,
-                pii_stripped=doc_type in ('private', 'uncertain'),
-                faker_substitutions=faker_subs,
-                review_flags=flag_count,
-                token_count=token_count,
-                output_file=output_dir / 'finetune' / 'dataset.jsonl',
-                lock=_get_write_lock(),
-            )
+        if doc_type in ('private', 'uncertain', 'published', 'caselaw'):
+            anon_id = document_id(path)
+            for part in chunks:
+                write_finetune_record(
+                    text=part.text, anon_id=anon_id, doc_type=doc_type,
+                    pii_stripped=redact and not dry_run, faker_substitutions=faker_subs,
+                    review_flags=flag_count, token_count=part.token_count,
+                    output_file=output_dir / 'finetune' / 'dataset.jsonl',
+                    lock=_get_write_lock(), chunk_index=part.index,
+                    total_chunks=part.total, replacement=replacement,
+                )
 
     return ProcessResult(
         path=path,
@@ -194,7 +137,7 @@ def process_file(path: Path, output_dir: Path, dry_run: bool = False) -> Process
         classification_confidence=classify_result.confidence,
         ocr=read_result.ocr,
         ocr_confidence=read_result.ocr_confidence,
-        pii_stripped=doc_type in ('private', 'uncertain'),
+        pii_stripped=redact and not dry_run,
         faker_substitutions=faker_subs,
         review_flags=flag_count,
         chunk_count=len(chunks),
@@ -228,10 +171,26 @@ def process_directory(
     dry_run: bool = False,
     workers: int = 1,
     sidecar_path: Optional[Path] = None,
+    preserve_public_text: bool = False,
+    replacement: str = 'tokens',
 ) -> None:
+    input_dir, output_dir = input_dir.resolve(), output_dir.resolve()
+    if not input_dir.is_dir():
+        raise ValueError('Input must be an existing directory')
+    if workers < 1:
+        raise ValueError('workers must be at least 1')
+    if replacement not in {'tokens', 'synthetic'}:
+        raise ValueError('replacement must be tokens or synthetic')
+    if input_dir == output_dir or input_dir in output_dir.parents or output_dir in input_dir.parents:
+        raise ValueError('Input and output directories must not overlap')
+    if not dry_run:
+        output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if any(output_dir.iterdir()):
+            raise ValueError('Output directory must be empty; use a new directory for each batch')
+        output_dir.chmod(0o700)
     all_files = [
         p for p in input_dir.rglob('*')
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        if p.is_file() and not p.is_symlink() and p.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
     if not all_files:
         print(f"No supported files in {input_dir}")
@@ -257,12 +216,12 @@ def process_directory(
         with ProcessPoolExecutor(max_workers=workers,
                                   initializer=_init_write_lock,
                                   initargs=(lock,)) as ex:
-            futures = {ex.submit(process_file, f, output_dir, dry_run): f for f in files}
+            futures = {ex.submit(_process_safely, f, output_dir, dry_run, preserve_public_text, replacement): f for f in files}
             for fut in as_completed(futures):
                 results.append(fut.result())
     else:
         for f in files:
-            results.append(process_file(f, output_dir, dry_run))
+            results.append(_process_safely(f, output_dir, dry_run, preserve_public_text, replacement))
 
     for r in results:
         _print_result(r, dry_run)
@@ -282,12 +241,24 @@ def process_directory(
                 token_count=r.token_count,
                 skipped=r.skipped,
                 skip_reason=r.skip_reason,
+                replacement=replacement,
             )
         manifest.save()
         generate_reports(output_dir)
         print(f"\nReports written to {output_dir}/")
-        print(f"  summary.html        — open in browser, print to PDF")
-        print(f"  review/review_log.csv — PII flags for spreadsheet review")
+        print("  summary.html        — open in browser, print to PDF")
+        print("  review/review_log.csv — confidential PII flags for local review")
+        errors = sum(r.skip_reason.startswith('processing_error:') for r in results if r.skip_reason)
+        if errors:
+            raise RuntimeError(f'{errors} file(s) failed; inspect provenance.json before using any output')
+
+
+def _process_safely(path, output_dir, dry_run, preserve_public_text, replacement):
+    try:
+        return process_file(path, output_dir, dry_run, preserve_public_text, replacement)
+    except Exception as exc:
+        return ProcessResult(path, 'unknown', 0.0, False, None, False, 0, 0, 0, 0,
+                             skipped=True, skip_reason='processing_error:' + type(exc).__name__)
 
 
 def _print_result(r: ProcessResult, dry_run: bool) -> None:

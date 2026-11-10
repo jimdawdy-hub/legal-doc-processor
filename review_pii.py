@@ -16,6 +16,7 @@ import json
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+from utils import atomic_text, csv_safe
 
 
 def load_flags(log_path: Path) -> list:
@@ -39,7 +40,7 @@ def print_summary(flags: list) -> None:
 
     by_type = Counter(f['entity_type'] for f in flags)
 
-    print(f"\nBy entity type:")
+    print("\nBy entity type:")
     for etype, count in by_type.most_common():
         print(f"  {etype:<25} {count:>5}")
 
@@ -54,7 +55,7 @@ def print_summary(flags: list) -> None:
     hi = max(f['confidence'] for f in flags)
     avg = sum(f['confidence'] for f in flags) / len(flags)
     print(f"\nConfidence range: {lo:.2f} – {hi:.2f}  (avg {avg:.2f})")
-    print(f"\nAll {len(flags)} entities were REDACTED with Faker replacements.")
+    print(f"\nAll {len(flags)} entities were processed by the configured replacement method.")
     print("Review these if you want to verify the redaction was appropriate.")
     print()
 
@@ -73,10 +74,10 @@ def print_flags(flags: list, limit: int = None) -> None:
 
 def export_csv(flags: list, out_path: Path) -> None:
     fieldnames = ['file', 'entity_type', 'confidence', 'original_text', 'context', 'action']
-    with open(out_path, 'w', newline='', encoding='utf-8') as f:
+    with atomic_text(out_path) as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
-        writer.writerows(flags)
+        writer.writerows({key: csv_safe(value) for key, value in flag.items()} for flag in flags)
     print(f"Exported {len(flags)} flags to {out_path}")
     print("Open in any spreadsheet. Sort by 'file' or 'entity_type' to work through them.")
 

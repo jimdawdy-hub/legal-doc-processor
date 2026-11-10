@@ -1,275 +1,187 @@
-# legal-doc-processor
+# Legal Document Processor
 
-An OpenClaw skill that converts legal documents into AI/LLM-ready datasets — token-efficient, PII-safe, and structured for both RAG retrieval and QLoRA fine-tuning.
+A standalone Python tool for extracting text from legal documents, detecting personal information, and producing redacted JSONL datasets (one JSON record per line). It runs from the command line and does not require an AI assistant, plugin, or agent skill.
 
-After processing, an AI red-team pass sends every private document through an adversarial re-identification analysis using Claude, identifying quasi-identifiers that survived the first PII pass and applying a targeted second-pass redaction automatically.
+The document-processing pass runs locally. An **optional, vendor-agnostic AI red-team pass** can assess residual re-identification risk through an explicitly approved HTTP endpoint. No provider or model is selected automatically.
 
-## What It Does
+> **Privacy requirement for external AI use**
+>
+> **Even anonymized or redacted PII sent to an AI for red-team analysis must be processed under a Business or Enterprise-level plan, with training on user data turned off.** A commercial API agreement must provide those same Business/Enterprise-level protections. Do not approve a vendor/service/model that trains on submitted user data. A paid consumer subscription or a model name alone does not satisfy this project's policy.
+>
+> **Zero Data Retention (ZDR) may also be required depending on the circumstances and jurisdiction.** Verify the applicable professional duties, client authorization, protective orders, confidentiality obligations, data-processing terms, subprocessors, residency, and retention settings before transmitting any material. A Business/Enterprise subscription and disabled training do **not** automatically provide ZDR. Confirm that ZDR actually covers the selected endpoint, model, and features when it is required.
+>
+> **Consult a privacy attorney if in doubt.** These are project usage requirements, not a claim that one subscription tier establishes legal compliance everywhere. Redaction does not by itself establish anonymity, preserve privilege against every disclosure, or authorize an upload.
 
-Processes PDF, DOCX, PPTX, EML, and MSG files through a modular pipeline:
+## What it processes
 
-- **Auto-classifies** each document as `caselaw`, `published` (journals, CLEs, treatises), `private` (emails, pleadings, client notes), or `uncertain`
-- **Strips PII** from private documents using Microsoft Presidio for detection and Faker for realistic synthetic replacement — so fine-tuning data reads as natural legal text, not redacted fragments
-- **Produces RAG-ready JSONL** for case law and published sources (512-token chunks with citation metadata)
-- **Produces fine-tuning JSONL** for private documents (2048-token records, anonymized source IDs)
-- **Generates a provenance manifest** suitable for dataset licensing and sale — includes SHA-256 hashes of source files, processing metadata, and fields for copyright/source attribution
-- **OCR support** for scanned PDFs via tesseract/ocrmypdf, with a quality gate that routes low-confidence files to a review queue rather than polluting the dataset
-- **AI red-team verification** sends every fine-tuning record through an adversarial re-identification assessment and applies a second-pass redaction to catch what Presidio missed
+- PDF, DOCX, PPTX, EML, MSG, and UTF-8 text.
+- Local text extraction and OCR for scanned PDFs. Low or unavailable OCR confidence holds the file for local review.
+- PII detection using Microsoft Presidio, a local spaCy model, and supplemental labeled medical/case identifiers.
+- Typed redaction markers by default; optional synthetic replacements for authorized testing or dataset preparation.
+- A local provenance manifest, review report, and human-review audit.
+- Optional AI assessment, followed by a separately requested second redaction pass.
 
-## Quick Start
+**Only extracted text is processed. Original PDFs, office documents, images, attachments, embedded objects, and their metadata are not rewritten or certified safe.** Do not upload an original file on the assumption that this tool has redacted it. This is not a HIPAA Safe Harbor or GDPR anonymization certification.
 
-```bash
-# Install dependencies
-pip3 install -r requirements.txt
-python3.12 -m spacy download en_core_web_lg
+## Install
 
-# Dry run — classify files, print plan, write nothing
-python3.12 process.py --input /path/to/docs --output /path/to/output --dry-run
-
-# Full run
-python3.12 process.py --input /path/to/docs --output /path/to/output
-
-# With copyright/source sidecar CSV
-python3.12 process.py --input /path/to/docs --output /path/to/output --sidecar sources.csv
-
-# Parallel processing
-python3.12 process.py --input /path/to/docs --output /path/to/output --workers 4
-```
-
-> **Note:** On systems where `python3` maps to Python 3.14+, use `python3.12` explicitly. Dependencies are installed under 3.12.
-
-## AI Red-Team Verification
-
-Presidio catches common PII (names, SSNs, phone numbers, dates) but misses **quasi-identifiers** — combinations of retained facts that can still identify a person even without an explicit name. In legal documents this typically means case numbers, uncommon surnames, specific medical facilities, treating physicians, docket entries, and narrow clinical narratives.
-
-After the initial pipeline run, `re_id_risk.py` sends every fine-tuning record to **Claude (`claude-opus-4-7`)** with an adversarial framing: *"You are a motivated adversary with access to PACER, CourtListener, newspaper archives, and medical provider directories. Can you identify the subject of this document?"*
-
-For each record Claude returns:
-
-- **Risk level** — `LOW` / `MEDIUM` / `HIGH` / `CRITICAL`
-- **Quasi-identifiers** — specific text still present that narrows identity (e.g. case number, rare surname, facility + procedure + date combination)
-- **Reconstruction path** — step-by-step: how an adversary would actually find this person
-- **Additional redactions** — exact phrases that should be removed
-
-`second_pass.py` then compiles all flagged terms into a regex pattern set and applies them across every fine-tuning and RAG JSONL file, replacing each with a typed token (`[PERSON]`, `[CASE_NO]`, `[ORGANIZATION]`, `[ADDRESS]`, etc.). Results are recorded in the provenance manifest and appended to the interactive HTML report.
-
-### Running the red-team pass
+Python **3.12 is tested**. Use a dedicated environment; dependency/model compatibility may differ on newer Python releases.
 
 ```bash
-# Assess all records and immediately apply second-pass redaction (recommended)
-ANTHROPIC_API_KEY=sk-ant-... python3.12 re_id_risk.py --output /path/to/output --apply
-
-# Assess only, review the report, then apply separately
-ANTHROPIC_API_KEY=sk-ant-... python3.12 re_id_risk.py --output /path/to/output
-python3.12 second_pass.py --output /path/to/output --dry-run   # preview first
-python3.12 second_pass.py --output /path/to/output
-
-# Retry any records that returned PARSE_ERROR (large docs sometimes need a retry)
-ANTHROPIC_API_KEY=sk-ant-... python3.12 re_id_risk.py --output /path/to/output --retry-errors --apply
-
-# Add case-specific terms to always redact (one per line, optional [TOKEN] in col 2)
-python3.12 second_pass.py --output /path/to/output --blocklist custom_terms.txt
+git clone https://github.com/jimdawdy-hub/legal-doc-processor.git
+cd legal-doc-processor
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m spacy download en_core_web_lg
 ```
 
-Requires an [Anthropic API key](https://console.anthropic.com) (separate from a Claude.ai subscription). At `claude-opus-4-7` pricing (~$5/1M input, $25/1M output), a 49-record dataset costs roughly $3–4 for the full assessment.
+Install Tesseract and OCRmyPDF system dependencies for scanned PDFs. Install the spaCy model before processing: the tool refuses to download an NLP model implicitly during a run. Tokenizer assets may require an initial download/cache population. No paid AI calls are needed for local processing or tests.
 
-### What the red-team catches
+## Local processing
 
-In testing on a real personal-injury malpractice case folder (60 documents, 49 fine-tuning records):
+Use a new, empty output directory outside the input directory for each batch:
 
-- Presidio's first pass generated **7,145 PII flags** across the dataset
-- The red-team pass identified **18 of 20 sampled records** as `HIGH` or `CRITICAL` risk despite that redaction — primarily because Presidio never learned the case-specific surname, missed case numbers entirely, and left treating physician and facility names intact
-- The second-pass redaction applied an additional **15,000+ substitutions** across the dataset using the red-team's findings
+```bash
+# Classify and estimate chunks without writing output or running PII detection
+python process.py --input /path/to/documents --output /path/to/new-output --dry-run
 
-The most common failure modes the red-team catches:
+# Local redaction, with typed markers such as [PERSON] and [US_SSN]
+python process.py --input /path/to/documents --output /path/to/new-output
 
-| What Presidio misses | Why | Red-team action |
-|---|---|---|
-| Uncommon surnames | Not in spaCy's NER training data | Flags as `patient_surname` → `[PERSON]` |
-| Court case numbers | Not a standard PII type | Flags as `case_number` → `[CASE_NO]` |
-| Treating physicians | Presidio only catches detected names, not OCR-mangled headers | Flags as `treating_physician` → `[PERSON]` |
-| Named facilities | Organizations aren't PHI under HIPAA Safe Harbor | Flags as `facility` → `[ORGANIZATION]` |
-| Quasi-identifier combinations | No single field is PII, but together they identify | Narrative reconstruction analysis |
+# Optional parallel processing
+python process.py --input /path/to/documents --output /path/to/new-output --workers 2
 
-## Document Type → Pipeline
-
-| Doc type | PII stripped | RAG output | Finetune output |
-|---|---|---|---|
-| `caselaw` | No | Yes — 512-token chunks with citation metadata | No |
-| `published` | No | Yes — 512-token chunks | Yes — full doc |
-| `private` | Yes — Presidio + Faker | No | Yes — 2048-token chunks |
-| `uncertain` | Yes — conservative | No | Yes — flagged in provenance |
-
-## Output Layout
-
+# Optional synthetic values; these are invented facts, not factual corrections
+python process.py --input /path/to/documents --output /path/to/new-output --replacement synthetic
 ```
-output/
-├── rag/                      ← one JSONL per source document, one record per chunk
-├── finetune/
-│   └── dataset.jsonl         ← one record per document (appended across all runs)
+
+Classification (`caselaw`, `published`, `private`, `uncertain`) controls chunk size and RAG routing (retrieval-augmented generation). **It does not establish that a document is public or exempt it from redaction.** All classes pass through PII detection by default, including presentations and documents carrying copyright footers.
+
+`--preserve-public-text` explicitly bypasses redaction for documents classified as `caselaw` or `published`. Use it only in a separately verified public-source batch; classification can be wrong. Keep it off for client files, medical records, mixed collections, and other confidential material.
+
+Only byte-identical files are deduplicated. Different documents with the same filename or different extensions are retained. Dataset IDs are stable opaque hashes of source paths, not Python's process-dependent `hash()`. These IDs are pseudonyms, not proof of anonymity.
+
+An unreadable/corrupt file is recorded in the local manifest while other files finish. The batch exits unsuccessfully if any processing errors occur; inspect its manifest before using any partial output. A nonempty output directory is refused to prevent appending duplicate records while overwriting the prior audit.
+
+## Outputs and confidentiality
+
+```text
+new-output/
+├── rag/                         # redacted retrieval chunks for public-source classes
+├── finetune/dataset.jsonl        # redacted analysis chunks for ALL classes
 ├── review/
-│   ├── review_log.jsonl      ← PII entities scored 0.50–0.84 (human sign-off needed)
-│   └── ocr_queue/            ← scanned PDFs where OCR confidence fell below 70%
-├── re_id_risk_report.json    ← per-record red-team assessments + overall risk summary
-├── summary.html              ← interactive report (PII flags, decisions, risk table)
-└── provenance.json           ← dataset manifest with full audit trail
+│   ├── review_log.jsonl          # CONFIDENTIAL: original detected values and context
+│   ├── review_log.csv            # CONFIDENTIAL: spreadsheet review export
+│   ├── decisions-*.csv           # CONFIDENTIAL: human-review decisions
+│   └── ocr_queue/               # CONFIDENTIAL: copies of unprocessed originals
+├── provenance.json              # CONFIDENTIAL: original filenames, paths, hashes, audit
+├── summary.html                 # CONFIDENTIAL: interactive review of original values
+└── re_id_risk_report.json        # CONFIDENTIAL: may reproduce residual identifiers
 ```
 
-### RAG chunk record
+**Never upload or distribute the whole output directory.** The report, provenance, review files, OCR queue, and AI findings deliberately retain information for local verification. Keep them on protected storage with appropriate access controls, encryption, backups, and deletion procedures. New batch directories are owner-only; generated files use private permissions. File permissions alone do not provide encryption or a retention policy.
+
+Only individually reviewed files in `rag/` or `finetune/` are candidates for a separately authorized transfer, and the external-AI requirements above still apply. The historical `finetune` directory name is retained for compatibility: it contains text chunks for review/analysis, not permission to train a model on client information.
+
+Each JSONL record has `text` and `metadata`, including an opaque source ID, document type, chunk position, and token count. `pii_stripped: true` means detection/replacement ran; it does **not** mean all identifying information was removed. Private records are split into approximately 2,048-token chunks; public-source classes use approximately 512-token chunks. Model tokenization and boundary behavior still need validation for the intended downstream system.
+
+## Optional AI red-team assessment
+
+**This step transmits already-processed text to the selected endpoint.** Remaining quasi-identifiers can identify someone through combinations of facts, such as a facility, rare procedure, incident date, or case number. The second redaction pass cannot undo the disclosure that enabled the AI to discover those identifiers. Do not send raw originals, local audit files, or identifiers as provider error diagnostics.
+
+The adapter uses a Chat Completions-style JSON HTTP interface (`model`, `messages`, `max_tokens`; response `choices[].message.content`). Choose a compliant vendor or approved gateway implementing that interface. It uses no vendor SDK (client library), embedded API key, default endpoint, or hard-coded model. Redirects are refused so credentials and document text are not silently sent to another destination.
+
+### No-training policy guard
+
+Copy `ai-policy.example.json` to a protected local file and fill it in **only after reviewing the provider's agreement and your organization/project settings**. The example is intentionally incomplete and cannot authorize an upload.
 
 ```json
 {
-  "id": "smith_v_jones_pdf_chunk_004",
-  "text": "The court held that...",
-  "metadata": {
-    "source": "smith_v_jones.pdf",
-    "doc_type": "caselaw",
-    "citation": "Smith v. Jones, 123 F.3d 456 (7th Cir. 2019)",
-    "court": "7th Cir.",
-    "year": 2019,
-    "chunk_index": 4,
-    "total_chunks": 17,
-    "token_count": 498,
-    "ocr": false
-  }
+  "endpoint": "https://approved-provider.example/v1/chat/completions",
+  "models": ["approved-model-id"],
+  "plan": "business",
+  "training_on_user_data": false,
+  "zdr_required": true,
+  "zdr_enabled": true,
+  "policy_reference": "Reviewed contract and tenant settings; reference held locally"
 }
 ```
 
-### Finetune record
+- `plan` must be `business` or `enterprise`, describing the actual commercial agreement.
+- The endpoint and model must exactly match the reviewed policy.
+- Training must be explicitly `false`; true, missing, or unknown values are rejected.
+- Both ZDR fields must be explicit booleans. If ZDR is required but not enabled, the tool refuses the request. Set `zdr_required` only after determining what your circumstances and jurisdiction require.
+- Record the reviewed contract/settings in `policy_reference`.
 
-```json
-{
-  "text": "Michael Johnson filed a motion on March 3rd...",
-  "metadata": {
-    "source": "anon_00042381",
-    "doc_type": "private",
-    "pii_stripped": true,
-    "faker_substitutions": 7,
-    "review_flags": 2,
-    "token_count": 1204
-  }
-}
+**The guard checks your supplied policy, not the truth of a vendor's promises.** It cannot inspect every provider contract, certify tenant settings, detect an undisclosed policy change, or guarantee a gateway's behavior. Recheck the policy when terms, models, features, or circumstances change. Do not approve training-enabled services.
+
+Set `RE_ID_API_KEY` securely in the environment when the endpoint requires a bearer key. Do not place keys in URLs, source control, or command arguments. Then run:
+
+```bash
+python re_id_risk.py --output /path/to/new-output \
+  --api-url https://approved-provider.example/v1/chat/completions \
+  --model approved-model-id \
+  --ai-policy /private/path/ai-policy.json \
+  --confirm-approved-ai-use
 ```
 
-## Sidecar CSV
+`RE_ID_API_URL`, `RE_ID_MODEL`, and `RE_ID_POLICY` are equivalent configuration variables. `--confirm-approved-ai-use` is required in addition to the policy file; it acknowledges the disclosure and the Business/Enterprise, no-training, and applicable retention requirements.
 
-Pre-populate copyright and source fields in the provenance manifest without editing JSON:
+All analysis records are assessed by default. `--samples N` explicitly limits the sample and cannot clear unassessed records. Legacy oversized records are sampled at the beginning, middle, and end (up to roughly 24,000 characters); truncated assessments are marked incomplete. The model is asked for residual identifiers, reconstruction risks, recommended redactions, and a risk level. Its response is schema-checked, not accepted as proof of anonymity.
+
+Failed/malformed results and partial assessments produce `UNKNOWN` overall risk rather than a misleading `LOW`. Retry failures using the same configuration plus `--retry-errors`. Retry identities include the chunk index, so chunks of the same document are not confused. A changed dataset requires a fresh assessment.
+
+```bash
+# Preview targeted additional redactions locally; no AI call
+python second_pass.py --output /path/to/new-output --dry-run
+
+# Apply reviewed findings, optionally adding a local term list
+python second_pass.py --output /path/to/new-output --blocklist /private/path/terms.txt
+```
+
+`--apply` on the assessment command requests automatic second-pass redaction after successful responses. Assessment errors block application. A partial sample is still a partial assessment, even if its known findings are applied. Applying changes makes the prior assessment stale; reassess the new text before relying on its risk result. Regex matches use literal strings, not model-supplied executable patterns.
+
+## Human review
+
+```bash
+python review_server.py --output /path/to/new-output
+```
+
+The server binds only to loopback and opens a private browser session. Its bootstrap link is saved in an owner-only file under `review/` rather than printed to logs. If no browser is available, use `--no-open` and open that file locally to obtain the link. The UI checks the session, request origin, and a review token before applying decisions. Do not expose it on a public interface.
+
+Or download decisions from `summary.html` and apply them locally:
+
+```bash
+python apply_decisions.py --decisions /private/path/decisions.csv \
+  --output /path/to/new-output --reviewer "Reviewer name"
+```
+
+Decisions must match current flag IDs and detected values. A restore reprocesses the original source and updates both dataset exports. Changed/missing originals and legacy unstable IDs are refused. Restoring after second-pass redaction is blocked because it could reintroduce removed identifiers; regenerate and reassess instead. A restore intentionally puts original text back into the output, so review the resulting data again.
+
+## Provenance and source permissions
+
+Use `--sidecar sources.csv` to add local copyright/source information:
 
 ```csv
 filename,copyright_status,source_url_or_collection,notes
-smith_v_jones.pdf,public domain,https://courtlistener.com/opinion/123/,
-client_brief.pdf,all rights reserved,internal,
+public_opinion.pdf,public domain,https://courtlistener.com/opinion/123/,Verify source and jurisdiction
 ```
 
-Pass with `--sidecar sources.csv`. Unmatched files leave those fields blank.
+Processing or anonymizing a document does not grant copyright, licensing, confidentiality, or dataset resale rights. Provenance and sidecar records stay local.
 
-## PII Handling
-
-Detection uses [Microsoft Presidio](https://github.com/microsoft/presidio) with a supplemental `PatternRecognizer` for high-reliability SSN detection. Replacement uses [Faker](https://faker.readthedocs.io/) for finetune output (natural text) and typed tokens for RAG output.
-
-| Presidio confidence | Action |
-|---|---|
-| ≥ 0.85 | Auto-redact; replace with Faker synthetic value |
-| 0.50 – 0.84 | Redact + write to `review_log.jsonl` for human sign-off |
-| < 0.50 | Leave in place |
-
-Faker replacements are **consistent within a document** — the same detected entity always maps to the same synthetic value, preserving co-reference coherence in the training data. Date shifts are format-preserving and consistent per document (180–730 day offset seeded by content hash), so temporal relationships between dates are preserved.
-
-Entity types detected: `PERSON`, `PHONE_NUMBER`, `EMAIL_ADDRESS`, `LOCATION`, `US_SSN`, `DATE_TIME` (birthdate context), `US_BANK_NUMBER`, `CREDIT_CARD`, `US_PASSPORT`, `US_DRIVER_LICENSE`, `IP_ADDRESS`, `MEDICAL_LICENSE`
-
-## Classification Signals
-
-Rule-based, no ML model required. Scored against the first 5,000 characters of each document.
-
-**Extension shortcuts (high confidence):**
-- `.eml`, `.msg` → `private` (0.99)
-- `.pptx` → `published` (0.90)
-
-**Content signals (partial list):**
-- Citation patterns (`123 F.3d 456`, `U.S.`, `S.Ct.`) → caselaw
-- `OPINION`, `AFFIRMED`, `REVERSED` → caselaw
-- `Vol. 42, No. 3`, `ISSN`, `CLE` → published
-- `To:/From:/Subject:` headers → private
-- `ATTORNEYS FOR`, `LAW DIVISION` → private
-- `PLAINTIFF`, `DEFENDANT` → private
-
-## Interactive Review
-
-After each pipeline run, `summary.html` opens in any browser. From there you can review every flagged PII entity, batch-approve or restore by file or entity type, and submit decisions directly to the local review server.
+## Tests and review
 
 ```bash
-# Start local review server (browser opens automatically)
-python3.12 review_server.py --output /path/to/output
-
-# OR apply a decisions CSV from the command line
-python3.12 apply_decisions.py --decisions decisions.csv --output /path/to/output --reviewer "Your Name"
+python -m pytest tests/ -q
 ```
 
-The review server writes an audit entry to `provenance.json` and archives each decisions file to `source_dir/audit/` for the chain-of-custody record.
+Tests use synthetic fixtures and mocked AI responses; they do not send client documents to a provider. See [the code review](docs/code-review.md) for fixes, validation, and remaining limits. Older design documents are historical, not current installation or privacy instructions.
 
-## After Running
+No detector catches every identity, language, OCR error, or combination of facts. This tool is a processing aid, not legal advice or a compliance guarantee. You remain responsible for verifying outputs and any disclosure. Consult a privacy attorney when uncertain.
 
-1. Fill in `output/provenance.json` dataset-level fields: `dataset_name`, `created_by`, `source_collection`, `license`, `jurisdiction_coverage`
-2. Review `output/review/review_log.jsonl` — verify each flagged PII entity
-3. Check `output/review/ocr_queue/` for PDFs needing manual OCR handling
-4. Run the AI red-team verification: `ANTHROPIC_API_KEY=... python3.12 re_id_risk.py --output /path/to/output --apply`
-
-## File Structure
-
-```
-legal-doc-processor/
-├── process.py          ← CLI entry point
-├── pipeline.py         ← orchestrator
-├── reader.py           ← PDF/DOCX/PPTX/EML/MSG/TXT → ReadResult
-├── classifier.py       ← text + path → ClassifyResult (doc_type, confidence)
-├── cleaner.py          ← strip headers, line numbers, Westlaw annotations
-├── pii.py              ← Presidio detection + Faker replacement + review log
-├── chunker.py          ← token-aware chunking via langchain-text-splitters
-├── writer.py           ← RAG JSONL + finetune JSONL writers
-├── provenance.py       ← ProvenanceManifest with sidecar CSV support
-├── reporter.py         ← generates summary.html + review_log.csv
-├── review_server.py    ← local HTTP server for in-browser PII review
-├── apply_decisions.py  ← apply decisions CSV, write audit entry
-├── review_pii.py       ← standalone CLI for reviewing PII flags
-├── re_id_risk.py       ← AI red-team: adversarial re-identification assessment
-├── second_pass.py      ← targeted second-pass redaction from red-team findings
-├── SKILL.md            ← OpenClaw agent instructions
-├── requirements.txt
-└── tests/              ← 56 tests, pytest
-```
-
-## Running Tests
-
-```bash
-python3.12 -m pytest tests/ -v
-```
-
-## Requirements
-
-**System:** Python 3.12+, tesseract, ocrmypdf
-
-**Python packages:** see `requirements.txt`
-
-**spaCy model:** `python3.12 -m spacy download en_core_web_lg`
-
-**For AI red-team:** Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
-
-## Legal Disclaimer
-
-**This tool uses artificial intelligence to detect and redact personally identifiable information (PII). AI systems make mistakes.** No automated PII detection or re-identification risk assessment is foolproof. False negatives (missed PII) and false positives (incorrectly flagged text) are inevitable.
-
-**The user is solely responsible for verifying that all output documents are free of PII before use.** This includes, but is not limited to:
-
-- Manually reviewing all flagged entities in `review_log.jsonl` and the interactive `summary.html` report
-- Running the AI red-team verification pass (`re_id_risk.py`) and reviewing its findings
-- Checking `re_id_risk_report.json` for any `HIGH` or `CRITICAL` risk records and acting on the recommendations
-- Inspecting the OCR queue for documents that bypassed automated processing
-- Conducting your own independent review of a sample of output records before distributing or using the dataset
-
-This tool is provided as a processing aid, not as a guarantee of compliance with any privacy law or regulation (including but not limited to HIPAA, GDPR, CCPA, state bar ethics rules, or court protective orders). Consult qualified legal counsel regarding your specific compliance obligations.
-
-**By using this tool, you acknowledge that you understand these limitations and accept full responsibility for the accuracy and legality of any output.**
+Policy sources to verify for your chosen provider and matter: [ABA Formal Opinion 512](https://www.americanbar.org/content/dam/aba/administrative/professional_responsibility/ethics-opinions/aba-formal-opinion-512.pdf), [an example of commercial no-training terms](https://openai.com/enterprise-privacy/), and [an example of endpoint-specific retention/ZDR controls](https://developers.openai.com/api/docs/guides/your-data). Provider examples do not constitute approval of a vendor, plan, or configuration.
 
 ## License
 
-MIT
+MIT. Source-document rights are separate from this code's license.
