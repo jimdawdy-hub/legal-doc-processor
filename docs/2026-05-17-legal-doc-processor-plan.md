@@ -1,3 +1,5 @@
+> Historical design notes. Current behavior and privacy requirements are documented in the root README and code-review.md; embedded examples below are not current installation instructions.
+
 # Legal Document Processor Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -13,7 +15,7 @@
 ## File Map
 
 ```
-~/.openclaw/workspace/skills/legal-doc-processor/
+/path/to/legal-doc-processor/
 ├── SKILL.md
 ├── requirements.txt
 ├── process.py          ← CLI entry point (argparse → pipeline.process_directory)
@@ -42,13 +44,13 @@
 ### Task 1: Scaffold — directory, git, requirements, install dependencies
 
 **Files:**
-- Create: `~/.openclaw/workspace/skills/legal-doc-processor/requirements.txt`
-- Create: `~/.openclaw/workspace/skills/legal-doc-processor/tests/conftest.py`
+- Create: `/path/to/legal-doc-processor/requirements.txt`
+- Create: `/path/to/legal-doc-processor/tests/conftest.py`
 
 - [ ] **Step 1: Initialize git repo and create directory structure**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 git init
 mkdir -p tests
 touch tests/__init__.py
@@ -87,7 +89,7 @@ pytest>=8.0.0
 - [ ] **Step 3: Install dependencies**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 pip3 install -r requirements.txt
 python3 -m spacy download en_core_web_lg
 ```
@@ -187,7 +189,7 @@ def private_text():
 - [ ] **Step 5: Verify pytest is importable**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 python3 -m pytest --collect-only
 ```
 
@@ -196,7 +198,7 @@ Expected: `no tests ran` (no test files yet) — no import errors.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 git add requirements.txt tests/conftest.py tests/__init__.py
 git commit -m "feat: scaffold legal-doc-processor skill"
 ```
@@ -261,7 +263,7 @@ def test_strips_westlaw_annotation_lines():
 - [ ] **Step 2: Run tests to confirm they fail**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 python3 -m pytest tests/test_cleaner.py -v
 ```
 
@@ -322,7 +324,7 @@ def clean(text: str) -> str:
 - [ ] **Step 4: Run tests to confirm they pass**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 python3 -m pytest tests/test_cleaner.py -v
 ```
 
@@ -1958,133 +1960,9 @@ git commit -m "feat: add pipeline orchestrator and CLI entry point"
 
 ---
 
-### Task 10: SKILL.md
+### Task 10: Standalone usage documentation
 
-**Files:**
-- Create: `SKILL.md`
-
-- [ ] **Step 1: Write SKILL.md**
-
-```markdown
----
-name: legal-doc-processor
-description: >
-  Convert legal documents (PDF, DOCX, PPTX, EML, MSG) into AI/LLM-ready JSONL
-  datasets. Strips PII from private documents using Presidio + Faker. Produces
-  RAG-chunked output for case law and fine-tuning records for private/client docs.
-  Includes provenance manifest for dataset buyers.
-metadata:
-  openclaw:
-    emoji: "⚖️"
-    os: ["linux", "darwin"]
-    requires:
-      bins: ["python3", "tesseract", "ocrmypdf"]
-      pip: ["presidio-analyzer", "presidio-anonymizer", "faker", "pymupdf",
-            "pytesseract", "python-docx", "python-pptx", "extract-msg",
-            "pdfminer.six", "langchain-text-splitters", "tiktoken"]
----
-
-# Legal Document Processor
-
-Convert legal PDFs, DOCX, PPTX, EML, and MSG files into token-efficient,
-PII-safe JSONL datasets for RAG retrieval and QLoRA fine-tuning.
-
-## First-Time Setup
-
-```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
-pip3 install -r requirements.txt
-python3 -m spacy download en_core_web_lg
-```
-
-## Usage
-
-```bash
-# Full run
-python3 process.py --input /path/to/docs --output /path/to/output
-
-# Dry run — classify files, print plan, write nothing
-python3 process.py --input /path/to/docs --output /path/to/output --dry-run
-
-# With copyright/source sidecar CSV
-python3 process.py --input /path/to/docs --output /path/to/output --sidecar sources.csv
-
-# Parallel processing
-python3 process.py --input /path/to/docs --output /path/to/output --workers 4
-```
-
-## Sidecar CSV Format
-
-```csv
-filename,copyright_status,source_url_or_collection,notes
-smith_v_jones.pdf,public domain,https://courtlistener.com/opinion/123/,
-client_brief.pdf,all rights reserved,internal,
-```
-
-## Output Layout
-
-```
-output/
-├── rag/                    ← chunked JSONL for case law + published docs
-├── finetune/dataset.jsonl  ← full-doc JSONL for private + published docs
-├── review/
-│   ├── review_log.jsonl    ← PII entities flagged for human review
-│   └── ocr_queue/          ← PDFs with OCR confidence below 70%
-└── provenance.json         ← dataset manifest (fill in dataset-level fields)
-```
-
-## Document Type → Pipeline
-
-| Doc type | PII stripped | RAG output | Finetune output |
-|---|---|---|---|
-| `caselaw` | No | Yes (512-token chunks) | No |
-| `published` | No | Yes (512-token chunks) | Yes (full doc) |
-| `private` | Yes — Presidio + Faker | No | Yes (2048-token chunks) |
-| `uncertain` | Yes — conservative | No | Yes — flagged in provenance |
-
-## Dry Run First
-
-Always run `--dry-run` on a new input directory to verify classification
-before committing to a full run. Check the classification column for
-surprising assignments before processing.
-
-## After Running
-
-1. Open `output/provenance.json` and fill in the dataset-level fields:
-   `dataset_name`, `created_by`, `source_collection`, `license`,
-   `jurisdiction_coverage`.
-2. Review `output/review/review_log.jsonl` — each entry is a PII entity
-   the pipeline wasn't certain about. Verify and remove records from
-   the finetune dataset if needed.
-3. Check `output/review/ocr_queue/` for any PDFs that couldn't be OCR'd
-   reliably (mean word confidence < 70%). These need manual handling.
-
-## PII Confidence Thresholds
-
-| Presidio score | Action |
-|---|---|
-| ≥ 0.85 | Auto-redact; replace with Faker synthetic value |
-| 0.50–0.84 | Redact + write to review_log.jsonl for sign-off |
-| < 0.50 | Leave in place |
-```
-
-- [ ] **Step 2: Run full test suite to confirm nothing broke**
-
-```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
-python3 -m pytest tests/ -v
-```
-
-Expected: all tests PASS.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add SKILL.md
-git commit -m "feat: add SKILL.md agent instruction file"
-```
-
----
+Superseded by the current README. No assistant-specific installation or skill metadata is required.
 
 ### Task 11: Smoke test with real files
 
@@ -2100,7 +1978,7 @@ mkdir -p /tmp/legal-test-input
 - [ ] **Step 2: Run dry-run first**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 python3 process.py --input /tmp/legal-test-input --output /tmp/legal-test-output --dry-run
 ```
 
@@ -2133,7 +2011,7 @@ cat /tmp/legal-test-output/review/review_log.jsonl 2>/dev/null || echo "No PII f
 - [ ] **Step 5: Final commit**
 
 ```bash
-cd ~/.openclaw/workspace/skills/legal-doc-processor
+cd /path/to/legal-doc-processor
 git add -A
 git commit -m "feat: complete legal-doc-processor skill — all tests passing"
 ```

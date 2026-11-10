@@ -3,7 +3,7 @@
 Second-pass redaction for the legal-doc-processor pipeline.
 
 Reads re_id_risk_report.json (produced by re_id_risk.py), extracts quasi-identifiers
-and additional_redactions flagged by Claude, and applies them to all JSONL output files.
+and additional_redactions flagged by the AI assessment, and applies them to JSONL outputs.
 
 Usage:
     python3.12 second_pass.py --output /path/to/output [--dry-run] [--blocklist terms.txt]
@@ -27,6 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from reporter import generate_reports
+from utils import atomic_text, write_json, sha256_file
+from chunker import count_tokens
 
 # ---------------------------------------------------------------------------
 # Replacement token map: quasi-identifier type → [TOKEN]
@@ -100,7 +102,7 @@ def _extract_targets(report: dict) -> list[tuple[str, str]]:
 
     def _add(value: str, token: str) -> None:
         value = value.strip()
-        if not value or value.lower() in seen or len(value) > 300:
+        if len(value) < 3 or value.lower() in seen or len(value) > 300:
             return
         # Skip values that are pure descriptions rather than extractable strings
         if value.startswith('(') or '→' in value or value.startswith('e.g.'):
@@ -115,11 +117,7 @@ def _extract_targets(report: dict) -> list[tuple[str, str]]:
         for qi in assessment.get('quasi_identifiers', []):
             raw = qi.get('value', '').strip()
             token = _token_for_type(qi.get('type', ''))
-            # Values often contain notes after a slash or parenthetical — take first segment
-            for part in re.split(r'\s*[/;]\s*|\s*\(also\s*', raw):
-                part = part.strip().rstrip(')')
-                if len(part) >= 3:
-                    _add(part, token)
+            _add(raw, token)
 
         for phrase in assessment.get('additional_redactions', []):
             _add(phrase, _FALLBACK_TOKEN)
@@ -166,7 +164,7 @@ def _compile_patterns(targets: list[tuple[str, str]]) -> list[tuple[re.Pattern, 
 def _apply_patterns(text: str, patterns: list[tuple[re.Pattern, str]]) -> tuple[str, int]:
     count = 0
     for pat, token in patterns:
-        new, n = pat.subn(token, text)
+        new, n = pat.subn(lambda _: token, text)
         if n:
             text = new
             count += n
@@ -197,9 +195,10 @@ def _patch_jsonl(path: Path, patterns: list[tuple[re.Pattern, str]],
             changed += 1
             if not dry_run:
                 rec['text'] = new_text
+                rec.setdefault('metadata', {})['token_count'] = count_tokens(new_text)
 
     if not dry_run and total_subs:
-        with open(path, 'w', encoding='utf-8') as f:
+        with atomic_text(path) as f:
             for rec in records:
                 f.write(json.dumps(rec, ensure_ascii=False) + '\n')
 
@@ -222,10 +221,17 @@ def run_second_pass(
 ) -> dict:
     report_path = output_dir / 're_id_risk_report.json'
     if not report_path.exists():
-        print(f"No re_id_risk_report.json found. Run re_id_risk.py first.", file=sys.stderr)
-        sys.exit(1)
-
-    report = json.loads(report_path.read_text())
+        if not extra_blocklist:
+            raise ValueError('Provide an assessment report or a local blocklist')
+        report = {'assessments': []}
+    else:
+        report = json.loads(report_path.read_text())
+        dataset = output_dir / 'finetune' / 'dataset.jsonl'
+        if report.get('dataset_sha256') != sha256_file(dataset):
+            raise ValueError('Dataset changed or report is legacy; run a fresh assessment')
+        if any(a.get('risk_level') not in {'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'}
+               for a in report.get('assessments', [])):
+            raise ValueError('Resolve assessment errors before applying second-pass redactions')
     targets = _extract_targets(report)
     if extra_blocklist:
         # Prepend (already sorted by length) — merge and re-sort
@@ -271,7 +277,7 @@ def run_second_pass(
         _update_provenance(output_dir, all_targets, file_stats, total_subs)
         generate_reports(output_dir)
         if not quiet:
-            print(f"  Provenance updated, reports regenerated.")
+            print("  Provenance updated, reports regenerated.")
 
     return {
         'dry_run': dry_run,
@@ -293,7 +299,7 @@ def _update_provenance(output_dir: Path, targets: list[tuple[str, str]],
         'total_substitutions': total_subs,
         'files_patched': [s['file'] for s in file_stats if s['substitutions']],
     })
-    prov_path.write_text(json.dumps(prov, indent=2))
+    write_json(prov_path, prov)
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +373,7 @@ def main() -> None:
 
     if args.preview:
         report_path = args.output / 're_id_risk_report.json'
-        report = json.loads(report_path.read_text())
+        report = json.loads(report_path.read_text()) if report_path.exists() else {'assessments': []}
         targets = _extract_targets(report)
         if extra:
             targets = extra + targets

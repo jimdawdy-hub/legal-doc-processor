@@ -13,7 +13,6 @@ regex>=2024.0.0
 
 # PII
 presidio-analyzer>=2.2.0
-presidio-anonymizer>=2.2.0
 spacy>=3.7.0
 Faker>=26.0.0
 
@@ -21,8 +20,8 @@ Faker>=26.0.0
 langchain-text-splitters>=0.3.0
 tiktoken>=0.7.0
 
-# Claude API (re-identification risk assessment)
-anthropic>=0.68.0
+# Date parsing for optional synthetic date shifts
+python-dateutil>=2.9.0
 
 # Testing
 pytest>=8.0.0

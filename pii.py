@@ -1,14 +1,15 @@
 import hashlib
 import re
+import secrets
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import List, Optional
 
-from utils import sha256_file
 
 from faker import Faker
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
-from presidio_anonymizer import AnonymizerEngine
+from presidio_analyzer import RecognizerResult
 
 try:
     from dateutil import parser as dateutil_parser
@@ -29,13 +30,12 @@ MAX_PRESIDIO_CHARS = 900_000  # spaCy's default limit is 1M; stay safely under i
 LOW_CONFIDENCE = 0.50
 
 ENTITY_TYPES = [
-    "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "LOCATION",
+    "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "LOCATION", "ORGANIZATION", "URL", "NRP",
     "US_SSN", "DATE_TIME", "US_BANK_NUMBER", "CREDIT_CARD",
     "US_PASSPORT", "US_DRIVER_LICENSE", "IP_ADDRESS", "MEDICAL_LICENSE",
 ]
 
 _analyzer: Optional[AnalyzerEngine] = None
-_anonymizer: Optional[AnonymizerEngine] = None
 
 # Month name tables for format preservation
 _MONTH_FULL  = ['January','February','March','April','May','June',
@@ -116,13 +116,16 @@ def _shift_date(date_str: str, offset_days: int) -> str:
     Returns the original string unchanged if parsing fails.
     """
     if not DATEUTIL_AVAILABLE:
-        return date_str
+        return '[DATE]'
     try:
         parsed = dateutil_parser.parse(date_str, fuzzy=True)
     except Exception:
-        return date_str
+        return '[DATE]'
 
-    shifted = parsed + timedelta(days=offset_days)
+    try:
+        shifted = parsed + timedelta(days=offset_days)
+    except OverflowError:
+        return '[DATE]'
 
     # Find the matching format pattern and reformat
     for pattern, formatter in _DATE_FORMAT_PATTERNS:
@@ -147,8 +150,11 @@ def _doc_date_offset(text: str) -> int:
 
 
 def _get_engines():
-    global _analyzer, _anonymizer
+    global _analyzer
     if _analyzer is None:
+        from spacy.util import is_package
+        if not is_package('en_core_web_lg'):
+            raise RuntimeError('Install en_core_web_lg before processing; automatic model download is disabled')
         _analyzer = AnalyzerEngine()
         # Supplement built-in US_SSN with an explicit high-confidence pattern recognizer
         # so NNN-NN-NNNN is always caught regardless of Presidio's validation scoring
@@ -157,8 +163,7 @@ def _get_engines():
             patterns=[Pattern("SSN_PATTERN", r'\b\d{3}-\d{2}-\d{4}\b', 0.90)],
             context=["ssn", "social security", "social security number"],
         ))
-        _anonymizer = AnonymizerEngine()
-    return _analyzer, _anonymizer
+    return _analyzer, None
 
 
 def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') -> PIIResult:
@@ -173,7 +178,7 @@ def strip_pii(text: str, source_filename: str, output_mode: str = 'finetune') ->
 
     high = [r for r in results if r.score >= HIGH_CONFIDENCE]
     medium = [r for r in results if LOW_CONFIDENCE <= r.score < HIGH_CONFIDENCE]
-    to_redact = high + medium
+    to_redact = _deduplicate_overlaps(high + medium)
 
     review_flags = []
     for r in medium:
@@ -208,11 +213,9 @@ def _analyze_chunked(analyzer, text: str) -> list:
     Run Presidio in chunks to avoid spaCy's 1M character limit.
     Adjusts entity start/end offsets by chunk position before returning.
     """
-    if len(text) <= MAX_PRESIDIO_CHARS:
-        return analyzer.analyze(text=text, entities=ENTITY_TYPES, language='en')
-
     all_results = []
     offset = 0
+    overlap = min(256, MAX_PRESIDIO_CHARS // 4)
     while offset < len(text):
         chunk = text[offset:offset + MAX_PRESIDIO_CHARS]
         chunk_results = analyzer.analyze(text=chunk, entities=ENTITY_TYPES, language='en')
@@ -220,27 +223,47 @@ def _analyze_chunked(analyzer, text: str) -> list:
             r.start += offset
             r.end += offset
         all_results.extend(chunk_results)
-        offset += MAX_PRESIDIO_CHARS
-    return all_results
+        if offset + MAX_PRESIDIO_CHARS >= len(text):
+            break
+        offset += MAX_PRESIDIO_CHARS - overlap
+    # Labeled identifiers are common in medical/legal records but not all are
+    # covered by the default NLP model. Preserve their labels, redact the value.
+    labeled = re.compile(
+        r'\b(?:MRN|medical record (?:number|no\.?|id)|patient (?:id|number)|'
+        r'account (?:number|no\.?|id)|member (?:number|id)|policy (?:number|id)|'
+        r'claim (?:number|id)|docket (?:number|no\.?)|case (?:number|no\.?))'
+        r'\s*[:#=]\s*([A-Z0-9][A-Z0-9-]{2,})', re.I)
+    for match in labeled.finditer(text):
+        all_results.append(RecognizerResult('ID_NUMBER', *match.span(1), score=0.95))
+    unique = {}
+    for result in all_results:
+        key = (result.start, result.end, result.entity_type)
+        if key not in unique or result.score > unique[key].score:
+            unique[key] = result
+    return list(unique.values())
 
 
 def _deduplicate_overlaps(entities: list) -> list:
-    """Remove overlapping entities, keeping the one that starts earliest."""
+    """Cover the union of overlapping detections; never leave a detected tail."""
     if not entities:
         return entities
     sorted_ents = sorted(entities, key=lambda x: (x.start, -(x.end - x.start)))
-    deduped = [sorted_ents[0]]
+    deduped = [copy(sorted_ents[0])]
     for ent in sorted_ents[1:]:
         prev = deduped[-1]
         if ent.start < prev.end:
+            prev.end = max(prev.end, ent.end)
+            prev.score = max(prev.score, ent.score)
+            if ent.entity_type != prev.entity_type:
+                prev.entity_type = 'PII'
             continue
-        deduped.append(ent)
+        deduped.append(copy(ent))
     return deduped
 
 
 def _faker_replace(text: str, entities: list) -> str:
     fake = Faker()
-    Faker.seed(0)
+    fake.seed_instance(secrets.randbits(128))
     substitution_table: dict = {}
     date_offset = _doc_date_offset(text)
     entities = _deduplicate_overlaps(entities)
@@ -258,6 +281,7 @@ def _faker_replace(text: str, entities: list) -> str:
 
 
 def _token_replace(text: str, entities: list) -> str:
+    entities = _deduplicate_overlaps(entities)
     for r in sorted(entities, key=lambda x: x.start, reverse=True):
         token = f"[{r.entity_type}]"
         text = text[:r.start] + token + text[r.end:]
@@ -265,18 +289,18 @@ def _token_replace(text: str, entities: list) -> str:
 
 
 def _fake_value(entity_type: str, fake: Faker) -> str:
-    mapping = {
-        'PERSON':            fake.name(),
-        'PHONE_NUMBER':      fake.phone_number(),
-        'EMAIL_ADDRESS':     fake.email(),
-        'LOCATION':          fake.address().replace('\n', ', '),
-        'US_SSN':            fake.ssn(),
-        'DATE_TIME':         fake.date(),  # fallback only — normally handled by _shift_date
-        'US_BANK_NUMBER':    fake.bban(),
-        'CREDIT_CARD':       fake.credit_card_number(),
-        'US_PASSPORT':       f"{''.join(fake.random_letters(2)).upper()}{fake.numerify('#######')}",
-        'US_DRIVER_LICENSE': fake.numerify('D########'),
-        'IP_ADDRESS':        fake.ipv4(),
-        'MEDICAL_LICENSE':   fake.numerify('ML#######'),
+    factories = {
+        'PERSON': fake.name,
+        'PHONE_NUMBER': fake.phone_number,
+        'EMAIL_ADDRESS': fake.email,
+        'LOCATION': lambda: fake.address().replace('\n', ', '),
+        'US_SSN': fake.ssn,
+        'DATE_TIME': fake.date,
+        'US_BANK_NUMBER': fake.bban,
+        'CREDIT_CARD': fake.credit_card_number,
+        'US_PASSPORT': lambda: f"{''.join(fake.random_letters(2)).upper()}{fake.numerify('#######')}",
+        'US_DRIVER_LICENSE': lambda: fake.numerify('D########'),
+        'IP_ADDRESS': fake.ipv4,
+        'MEDICAL_LICENSE': lambda: fake.numerify('ML#######'),
     }
-    return mapping.get(entity_type, f"[{entity_type}]")
+    return factories.get(entity_type, lambda: f"[{entity_type}]")()

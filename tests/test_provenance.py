@@ -18,8 +18,10 @@ def _write_sidecar(tmp_dir: Path) -> Path:
     return sidecar
 
 def _add_sample_file(manifest: ProvenanceManifest, filename: str = "opinion.pdf", **kwargs):
+    source = manifest.output_dir / filename
+    source.write_bytes(b'synthetic document')
     defaults = dict(
-        original_path=Path(filename),
+        original_path=source,
         doc_type='caselaw',
         classification_confidence=0.91,
         ocr=False,

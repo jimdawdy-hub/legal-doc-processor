@@ -1,0 +1,9 @@
+{
+  "endpoint": "https://approved-provider.example/v1/chat/completions",
+  "models": ["approved-model-id"],
+  "plan": "business",
+  "training_on_user_data": null,
+  "zdr_required": null,
+  "zdr_enabled": null,
+  "policy_reference": ""
+}

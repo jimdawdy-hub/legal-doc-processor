@@ -9,6 +9,7 @@ import json
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+from utils import atomic_text, csv_safe
 
 
 def generate_reports(output_dir: Path) -> None:
@@ -21,8 +22,19 @@ def generate_reports(output_dir: Path) -> None:
 
     if flags:
         _write_csv(flags, review_dir / 'review_log.csv')
+    else:
+        (review_dir / 'review_log.csv').unlink(missing_ok=True)
 
     _write_html(flags, provenance, output_dir / 'summary.html')
+    risk_path = output_dir / 're_id_risk_report.json'
+    if risk_path.exists():
+        from re_id_risk import _append_risk_section
+        from utils import sha256_file
+        risk = _load_json(risk_path)
+        dataset = output_dir / 'finetune' / 'dataset.jsonl'
+        if dataset.exists() and risk.get('dataset_sha256') != sha256_file(dataset):
+            risk.update(status='stale — dataset changed; reassess', highest_risk_level='UNKNOWN')
+        _append_risk_section(output_dir / 'summary.html', risk)
 
 
 def _load_flags(path: Path) -> list:
@@ -47,14 +59,14 @@ def _write_csv(flags: list, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ['flag_id', 'file', 'entity_type', 'confidence',
                   'original_text', 'context', 'decision']
-    with open(out_path, 'w', newline='', encoding='utf-8') as f:
+    with atomic_text(out_path) as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
         for i, flag in enumerate(flags):
             row = dict(flag)
             row['flag_id'] = i
             row['decision'] = 'approve'
-            writer.writerow(row)
+            writer.writerow({key: csv_safe(value) for key, value in row.items()})
 
 
 def _esc(s: str) -> str:
@@ -78,11 +90,11 @@ def _write_html(flags: list, provenance: dict, out_path: Path) -> None:
          'confidence': f['confidence'], 'original_text': f['original_text'],
          'context': f['context']}
         for i, f in enumerate(flags)
-    ])
+    ]).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
     # Index of file names matching the data-bfile-idx on batch buttons
     file_index_json = json.dumps(
         [fname for fname, _ in sorted(by_file.items(), key=lambda x: -len(x[1]))]
-    )
+    ).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
 
     # --- per-file table rows ---
     file_rows = ''
@@ -98,7 +110,7 @@ def _write_html(flags: list, provenance: dict, out_path: Path) -> None:
         else:
             file_rows += (
                 f'<tr><td>{_esc(rec["original_filename"])}</td>'
-                f'<td><span class="tag {tag_cls}">{doc_type}</span></td>'
+                f'<td><span class="tag {tag_cls}">{_esc(doc_type)}</span></td>'
                 f'<td>{p.get("token_count",0):,}</td>'
                 f'<td>{flag_str}</td>'
                 f'<td>{p.get("chunk_count",0)}</td>'
@@ -222,7 +234,7 @@ def _write_html(flags: list, provenance: dict, out_path: Path) -> None:
 </table>
 
 {'<h2>PII Review — ' + str(len(flags)) + ' flagged entities</h2>' if flags else ''}
-{'<div style="background:#fefce8;border:1px solid #fde047;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:12px;color:#713f12"><strong>⚠ Audit trail note:</strong> Clicking buttons in this page does not record anything. Your decisions are only saved when you click <strong>Download Decisions CSV</strong> and then run <code>python3.12 apply_decisions.py --decisions decisions.csv --output /path/to/output --reviewer "Your Name"</code>. That command archives the decisions file, creates an audit entry in provenance.json, and (if needed) patches the dataset.</div>' if flags else ''}\n{'<p style="color:#555;font-size:12px">All were <strong>redacted</strong> with Faker replacements. Mark any that were <strong>wrongly</strong> detected (not actually PII) using the buttons below, then download and run apply_decisions.py to record your review.</p>' if flags else ''}
+{'<div style="background:#fefce8;border:1px solid #fde047;border-radius:6px;padding:12px 16px;margin-bottom:16px;font-size:12px;color:#713f12"><strong>⚠ Audit trail note:</strong> Clicking buttons in this page does not record anything. Your decisions are only saved when you click <strong>Download Decisions CSV</strong> and then run <code>python3.12 apply_decisions.py --decisions decisions.csv --output /path/to/output --reviewer "Your Name"</code>. That command archives the decisions file, creates an audit entry in provenance.json, and (if needed) patches the dataset.</div>' if flags else ''}\n{'<p style="color:#555;font-size:12px">All were <strong>redacted</strong> using the configured replacement method. Mark any that were <strong>wrongly</strong> detected (not actually PII) using the buttons below, then download and run apply_decisions.py to record your review.</p>' if flags else ''}
 
 {'''<h2>Batch Actions by Entity Type</h2>
 <table>
@@ -235,7 +247,7 @@ def _write_html(flags: list, provenance: dict, out_path: Path) -> None:
 ''' + file_summary_rows + '</table>' if flags else ''}
 
 {'<h2>All Flagged Entities</h2>' if flags else ''}
-{'<div id="filter-bar" class="no-print"><input type="text" id="search" placeholder="Filter by file or text..." oninput="applyFilter()"><select id="type-filter" onchange="applyFilter()"><option value="">All entity types</option>' + ''.join(f'<option>{t}</option>' for t in sorted(by_type.keys())) + '</select><button class="batch-btn" onclick="batchFiltered(\'approve\')">Approve filtered</button><button class="batch-btn restore" onclick="batchFiltered(\'restore\')">Restore filtered</button></div>' if flags else ''}
+{'<div id="filter-bar" class="no-print"><input type="text" id="search" placeholder="Filter by file or text..." oninput="applyFilter()"><select id="type-filter" onchange="applyFilter()"><option value="">All entity types</option>' + ''.join(f'<option>{_esc(t)}</option>' for t in sorted(by_type.keys())) + '</select><button class="batch-btn" onclick="batchFiltered(\'approve\')">Approve filtered</button><button class="batch-btn restore" onclick="batchFiltered(\'restore\')">Restore filtered</button></div>' if flags else ''}
 
 <table id="flags-table" {'style="display:none"' if not flags else ''}>
   <tr><th>#</th><th>File</th><th>Type</th><th>Detected text</th><th>Conf.</th><th>Context</th><th class="no-print">Decision</th></tr>
@@ -332,7 +344,11 @@ function downloadDecisions() {{
   const rows = ['flag_id,file,entity_type,original_text,confidence,decision'];
   FLAGS.forEach(f => {{
     const d = decisions[f.id] || 'approve';
-    const esc = s => '"' + String(s).replace(/"/g,'""') + '"';
+    const esc = s => {{
+      let value = String(s);
+      if (/^[=+@-]/.test(value.trimStart())) value = "'" + value;
+      return '"' + value.replace(/"/g,'""') + '"';
+    }};
     rows.push([f.id, esc(f.file), f.entity_type, esc(f.original_text), f.confidence, d].join(','));
   }});
   const blob = new Blob([rows.join('\\n')], {{type:'text/csv'}});
@@ -352,7 +368,7 @@ window.addEventListener('DOMContentLoaded', () => {{
     tr.innerHTML = `
       <td style="color:#aaa">${{f.id+1}}</td>
       <td style="font-size:11px">${{esc(f.file)}}</td>
-      <td><span class="tag tag-pii">${{f.entity_type}}</span></td>
+      <td><span class="tag tag-pii">${{esc(f.entity_type)}}</span></td>
       <td><strong>${{esc(f.original_text)}}</strong></td>
       <td class="conf">${{f.confidence.toFixed(2)}}</td>
       <td class="ctx">...${{esc(f.context)}}...</td>
@@ -369,8 +385,10 @@ function esc(s) {{
 }}
 
 // Detect whether we're being served by review_server.py
+let reviewToken = '';
 fetch('/status').then(r => r.json()).then(s => {{
   if (s.server) {{
+    reviewToken = s.review_token;
     document.getElementById('apply-btn').style.display = '';
     document.getElementById('dl-btn').style.marginLeft = '0';
   }}
@@ -408,7 +426,7 @@ async function applyDecisions() {{
   try {{
     const resp = await fetch('/apply', {{
       method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
+      headers: {{'Content-Type': 'application/json', 'X-Review-Token': reviewToken}},
       body: JSON.stringify({{decisions: all, reviewer}}),
     }});
     const result = await resp.json();
@@ -434,4 +452,5 @@ async function applyDecisions() {{
 </body>
 </html>"""
 
-    out_path.write_text(html, encoding='utf-8')
+    with atomic_text(out_path) as stream:
+        stream.write(html)

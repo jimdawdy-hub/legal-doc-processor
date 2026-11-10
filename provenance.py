@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from utils import sha256_file
+from utils import sha256_file, document_id, write_json
 
 
 class ProvenanceManifest:
@@ -59,12 +59,18 @@ class ProvenanceManifest:
         token_count: int,
         skipped: bool = False,
         skip_reason: Optional[str] = None,
+        replacement: str = 'tokens',
     ) -> None:
         sidecar_info = self.sidecar.get(original_path.name, {})
+        try:
+            digest = sha256_file(original_path)
+        except OSError:
+            digest = None
         self._files.append({
+            'source_id': document_id(original_path),
             'original_filename': original_path.name,
             'source_path': str(original_path.resolve()),
-            'sha256': sha256_file(original_path),
+            'sha256': digest,
             'doc_type': doc_type,
             'classification_confidence': round(classification_confidence, 3),
             'date_processed': datetime.now(timezone.utc).isoformat(),
@@ -74,6 +80,7 @@ class ProvenanceManifest:
             'skipped': skipped,
             'skip_reason': skip_reason,
             'processing': {
+                'replacement': replacement,
                 'ocr': ocr,
                 'ocr_confidence': round(ocr_confidence, 1) if ocr_confidence is not None else None,
                 'pii_stripped': pii_stripped,
@@ -105,4 +112,4 @@ class ProvenanceManifest:
         manifest = {**self._dataset_meta, 'files': self._files, 'summary': summary}
         if self._source_dir:
             manifest['source_dir'] = self._source_dir
-        self.manifest_path.write_text(json.dumps(manifest, indent=2))
+        write_json(self.manifest_path, manifest)

@@ -8,10 +8,11 @@ def test_collapses_excess_blank_lines():
     assert "First paragraph." in result
     assert "Second paragraph." in result
 
-def test_removes_leading_line_numbers():
+def test_preserves_numbered_substantive_lines():
     text = "1  The plaintiff filed suit.\n2  The defendant answered.\n10 The court ruled."
     result = clean(text)
-    assert "1  The" not in result
+    assert "1 The" in result
+    assert "10 The" in result
     assert "The plaintiff filed suit." in result
     assert "The defendant answered." in result
 

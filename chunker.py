@@ -42,7 +42,7 @@ def _get_encoder():
 
 
 def count_tokens(text: str) -> int:
-    return len(_get_encoder().encode(text))
+    return len(_get_encoder().encode(text, disallowed_special=()))
 
 
 def chunk(text: str, doc_type: str) -> List[Chunk]:
@@ -53,7 +53,7 @@ def chunk(text: str, doc_type: str) -> List[Chunk]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=config['chunk_size'],
         chunk_overlap=config['overlap'],
-        length_function=lambda t: len(enc.encode(t)),
+        length_function=lambda t: len(enc.encode(t, disallowed_special=())),
         separators=separators,
     )
 
@@ -66,7 +66,7 @@ def chunk(text: str, doc_type: str) -> List[Chunk]:
             text=s,
             index=i,
             total=len(splits),
-            token_count=len(enc.encode(s)),
+            token_count=len(enc.encode(s, disallowed_special=())),
         )
         for i, s in enumerate(splits)
     ]

@@ -3,12 +3,14 @@ import argparse
 import sys
 from pathlib import Path
 from pipeline import process_directory
+from utils import __version__
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Convert legal documents to AI/LLM-ready JSONL datasets.'
     )
+    parser.add_argument('--version', action='version', version=__version__)
     parser.add_argument('--input',   required=True, type=Path, help='Input directory')
     parser.add_argument('--output',  required=True, type=Path, help='Output directory')
     parser.add_argument('--dry-run', action='store_true',
@@ -17,6 +19,10 @@ def main() -> None:
                         help='Parallel worker processes (default: 1)')
     parser.add_argument('--sidecar', type=Path, default=None,
                         help='CSV with copyright/source info per file')
+    parser.add_argument('--preserve-public-text', action='store_true',
+                        help='Opt out of redaction for classified public sources; verify they contain no private material')
+    parser.add_argument('--replacement', choices=['tokens', 'synthetic'], default='tokens',
+                        help='Replacement style (default: typed tokens; synthetic values are not real facts)')
     args = parser.parse_args()
 
     if not args.input.is_dir():
@@ -32,6 +38,8 @@ def main() -> None:
         dry_run=args.dry_run,
         workers=args.workers,
         sidecar_path=args.sidecar,
+        preserve_public_text=args.preserve_public_text,
+        replacement=args.replacement,
     )
 
 

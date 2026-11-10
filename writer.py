@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from chunker import Chunk
+from utils import atomic_text, private_append
 
 
 def _slugify(filename: str) -> str:
@@ -22,7 +23,7 @@ def write_rag_chunks(
     slug = _slugify(source_filename)
     out_path = output_dir / f"{slug}.jsonl"
 
-    with open(out_path, 'w') as f:
+    with atomic_text(out_path) as f:
         for c in chunks:
             record = {
                 'id': f"{slug}_chunk_{c.index:03d}",
@@ -49,6 +50,9 @@ def write_finetune_record(
     token_count: int,
     output_file: Path,
     lock: Optional[object] = None,
+    chunk_index: int = 0,
+    total_chunks: int = 1,
+    replacement: str = 'synthetic',
 ) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -60,13 +64,16 @@ def write_finetune_record(
             'faker_substitutions': faker_substitutions,
             'review_flags': review_flags,
             'token_count': token_count,
+            'chunk_index': chunk_index,
+            'total_chunks': total_chunks,
+            'replacement': replacement,
         },
     }
     line = json.dumps(record) + '\n'
     if lock:
         with lock:
-            with open(output_file, 'a') as f:
+            with private_append(output_file) as f:
                 f.write(line)
     else:
-        with open(output_file, 'a') as f:
+        with private_append(output_file) as f:
             f.write(line)

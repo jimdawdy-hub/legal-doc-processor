@@ -138,10 +138,13 @@ def _read_msg(path: Path, size: int) -> ReadResult:
         f"Subject: {msg.subject or ''}\n"
         f"Date: {msg.date or ''}"
     )
-    return ReadResult(
-        text=f"{headers}\n\n{msg.body or ''}".strip(),
-        filename=path.name, extension='.msg', size_bytes=size,
-    )
+    try:
+        return ReadResult(
+            text=f"{headers}\n\n{msg.body or ''}".strip(),
+            filename=path.name, extension='.msg', size_bytes=size,
+        )
+    finally:
+        msg.close()
 
 
 def _read_pdf(path: Path, size: int) -> Optional[ReadResult]:
@@ -157,7 +160,7 @@ def _read_pdf(path: Path, size: int) -> Optional[ReadResult]:
 def _ocr_pdf(path: Path, size: int) -> Optional[ReadResult]:
     """Returns None if OCR confidence is below 70% threshold."""
     confidence = _sample_ocr_confidence(path)
-    if confidence is not None and confidence < 70.0:
+    if confidence is None or confidence < 70.0:
         return None  # caller moves to ocr_queue
 
     with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
@@ -183,16 +186,17 @@ def _sample_ocr_confidence(path: Path) -> Optional[float]:
     if not (FITZ_AVAILABLE and TESSERACT_AVAILABLE):
         return None
 
-    doc = fitz.open(str(path))
     confidences = []
-    for page_num in range(min(3, len(doc))):
-        pix = doc[page_num].get_pixmap(dpi=200)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-        page_conf = [
-            c for c in data['conf']
-            if isinstance(c, (int, float)) and c > 0
-        ]
-        confidences.extend(page_conf)
-
+    with fitz.open(str(path)) as doc:
+        for page_num in range(min(3, len(doc))):
+            pix = doc[page_num].get_pixmap(dpi=200)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            for value in data['conf']:
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    continue
+                if 0 < value <= 100:
+                    confidences.append(value)
     return sum(confidences) / len(confidences) if confidences else None

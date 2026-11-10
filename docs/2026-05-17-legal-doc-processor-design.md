@@ -1,7 +1,9 @@
+> Historical design notes. Current behavior and privacy requirements are documented in the root README and code-review.md; embedded examples below are not current installation instructions.
+
 # Legal Document Processor — Design Spec
 **Date:** 2026-05-17  
 **Status:** Approved  
-**Location:** `~/.openclaw/workspace/skills/legal-doc-processor/`
+**Location:** `/path/to/legal-doc-processor/`
 
 ---
 

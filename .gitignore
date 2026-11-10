@@ -10,3 +10,10 @@ build/
 
 # Local-only analysis / notes — never pushed to GitHub
 local-notes/
+
+.venv/
+# Local assistant configuration, client documents, and generated sensitive outputs
+.claude/
+output/
+outputs/
+ai-policy.local.json
