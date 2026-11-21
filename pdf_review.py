@@ -257,11 +257,15 @@ def main():
 
         nlp = spacy.load(args.ner_model, enable=['tok2vec', 'ner'])
     aliases = json.loads(args.aliases.read_text(encoding='utf-8')) if args.aliases else []
+    unconfirmed = []
     plan, _, _ = make_plan(source, days=args.date_shift_days, key=_key(args.key_file),
                            faker=Faker('en_US'), nlp=nlp,
                            extras=[*read_model_candidates(args.candidates), *candidates], spellings=aliases,
-                           date_corrections=[*reconcile_dates(source, independent, args.date_shift_days), *dates])
+                           date_corrections=[*reconcile_dates(source, independent, args.date_shift_days), *dates],
+                           review_flags=unconfirmed)
     counts, flags = compare(source, independent, visible, plan, days=args.date_shift_days, spellings=aliases)
+    flags.extend(unconfirmed)
+    counts['unconfirmed_person_suggestions'] = len(unconfirmed)
     if args.private_flags:
         _private_parent(args.private_flags)
         with args.private_flags.open('x', encoding='utf-8') as stream:
@@ -273,6 +277,8 @@ def main():
         raise SystemExit('Confirmed patient name or surname remains in the rendered pages.')
     if counts['known_patient_aliases_checked'] and not counts['known_patient_alias_source_pages']:
         raise SystemExit('The confirmed patient aliases did not match either source OCR transcript.')
+    if unconfirmed:
+        raise SystemExit('Unconfirmed person suggestions need review at their source positions.')
 
 
 if __name__ == '__main__':

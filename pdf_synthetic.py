@@ -156,8 +156,16 @@ def load_repairs(path, pages, days):
         number, index, start, end, role, box, reading = row
         page = geoms[number]
         rect = pymupdf.Rect(box) & pymupdf.Rect(0, 0, page.width, page.height)
-        if role not in ROLES or rect.is_empty:
+        if (role not in ROLES and role != 'keep') or rect.is_empty:
             raise ValueError('Invalid local repair coordinates or role.')
+        if role == 'keep':
+            if not 0 <= index < len(page.lines):
+                raise ValueError('A keep decision requires an existing source line.')
+            text = page.lines[index].text
+            if not 0 <= start < end <= len(text) or reading != text[start:end]:
+                raise ValueError('A keep decision must match the exact source text.')
+            extra_candidates.append(((number, index), Candidate(start, end, role, 109, reading)))
+            continue
         if index == -1:
             # A second engine can read a region the first engine missed entirely.
             if not isinstance(reading, str) or not reading.strip() or len(reading) > 120:
@@ -681,7 +689,7 @@ def main():
     parser.add_argument('--workers', type=int, default=1)
     parser.add_argument('--barcodes', action='store_true', help='Scan locally and mask decoded barcodes')
     parser.add_argument('--review-draft', action='store_true',
-                        help='Keep a private review PDF if searchable amounts or barcodes need review')
+                        help='Keep a private PDF with unresolved name, billing, or barcode findings')
     args = parser.parse_args()
     if args.date_shift_days == 0 or not 150 <= args.dpi <= 600 or not 1 <= args.workers <= 16:
         parser.error('Provide a nonzero shift, 150 to 600 DPI, and 1 to 16 workers.')
@@ -707,6 +715,8 @@ def main():
                                         extras=[*read_model_candidates(args.candidates), *manual_candidates],
                                         spellings=spellings, date_corrections=[*corrections, *manual_dates])
     print(json.dumps({'planned': receipt}), flush=True)
+    if receipt['unconfirmed_person_suggestions'] and not args.review_draft:
+        raise SystemExit('Unconfirmed person suggestions need review. Use --review-draft to keep a private copy.')
     with NamedTemporaryFile(dir=args.output.parent, suffix='.pdf') as output:
         rendered = render(args.input, output.name, pages, plan, font_path=args.font,
                           dpi=args.dpi, barcodes=args.barcodes, workers=args.workers,

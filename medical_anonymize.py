@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 import hashlib
 import hmac
+from itertools import chain
 import json
 import re
 import unicodedata
@@ -121,6 +122,7 @@ class Candidate:
     role: str
     trust: int
     replacement: str | None = None
+    model_suggested: bool = False
 
 
 @dataclass(frozen=True)
@@ -324,7 +326,7 @@ def _model_candidates(nlp, pages):
                 role = 'address'
             else:
                 continue
-            yield location, Candidate(entity.start_char, entity.end_char, role, 63)
+            yield location, Candidate(entity.start_char, entity.end_char, role, 63, model_suggested=True)
 
 
 def read_model_candidates(paths):
@@ -334,7 +336,7 @@ def read_model_candidates(paths):
                 record = json.loads(row)
                 for line, start, end, role in record['candidates']:
                     if role in ROLES - {'date'}:
-                        yield (record['page'], line), Candidate(start, end, role, 69)
+                        yield (record['page'], line), Candidate(start, end, role, 69, model_suggested=True)
 
 
 def _choose(text, candidates):
@@ -647,7 +649,8 @@ def _patient_name_candidates(page, identities, candidates):
                                              name.replacement if member is target else '')
 
 
-def make_plan(pages, *, days, key, faker, nlp=None, extras=(), spellings=(), date_corrections=()):
+def make_plan(pages, *, days, key, faker, nlp=None, extras=(), spellings=(), date_corrections=(),
+              review_flags=None):
     """Return line/span replacements, the shared registry and a text-free count receipt."""
     candidates = defaultdict(list)
     date_edits = {}
@@ -674,11 +677,20 @@ def make_plan(pages, *, days, key, faker, nlp=None, extras=(), spellings=(), dat
         date_edits[location, value.start, value.end] = value
         candidates[location].append(Candidate(value.start, value.end, 'date', 119))
         receipt['independent_date_corrections'] += 1
-    if nlp is not None:
-        for location, item in _model_candidates(nlp, pages):
-            candidates[location].append(item)
-    for location, item in extras:
-        if location in texts:
+    unconfirmed = defaultdict(list)
+    reviewed = defaultdict(list)
+    local_model = _model_candidates(nlp, pages) if nlp is not None else ()
+    for location, item in chain(local_model, extras):
+        if location not in texts:
+            continue
+        if item.role == 'keep':
+            text = texts[location]
+            if not 0 <= item.start < item.end <= len(text) or item.replacement != text[item.start:item.end]:
+                raise ValueError('A reviewed keep span must match the source transcript.')
+            reviewed[location].append(item)
+        elif item.model_suggested and item.role in PEOPLE:
+            unconfirmed[location].append(item)
+        else:
             candidates[location].append(item)
     observations = Counter()
     spellings_seen = {}
@@ -718,6 +730,17 @@ def make_plan(pages, *, days, key, faker, nlp=None, extras=(), spellings=(), dat
             raise RuntimeError('A proposed replacement changes a protected amount.')
         if edits:
             result[location] = edits
+    receipt['unconfirmed_person_suggestions'] = 0
+    for location, items in unconfirmed.items():
+        text = texts[location]
+        resolved = (*result.get(location, ()), *reviewed.get(location, ()))
+        possible = (_tighten(text, x) for x in items if 0 <= x.start < x.end <= len(text))
+        pending = [item for item in possible
+                   if not any(other.start <= item.start and item.end <= other.end for other in resolved)]
+        for item in _choose(text, pending):
+            receipt['unconfirmed_person_suggestions'] += 1
+            if review_flags is not None:
+                review_flags.append((*location, item.start, item.end, 'unconfirmed_person'))
     receipt['ambiguous_aliases'] = len(registry.ambiguous)
     receipt['unique_replacements'] = len(registry.values)
     receipt['unique_replacements_by_role'] = dict(Counter(role for role, _ in registry.values))

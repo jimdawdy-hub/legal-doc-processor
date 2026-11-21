@@ -95,8 +95,8 @@ python pdf_synthetic.py /path/to/source.pdf \
   --independent-source private-case/independent-source.jsonl \
   --date-shift-days 45 --ner-model en_core_web_lg --font /path/to/local-font.ttf \
   --aliases private-case/entity-aliases.json \
-  --key-file private-case/case.key --barcodes --output private-case/synthetic.pdf
-python pdf_review.py scan private-case/synthetic.pdf \
+  --key-file private-case/case.key --barcodes --review-draft --output private-case/draft.pdf
+python pdf_review.py scan private-case/draft.pdf \
   --output private-case/independent-output.jsonl
 python pdf_review.py compare --transcript private-case/positioned-text.jsonl \
   --independent-source private-case/independent-source.jsonl \
@@ -126,11 +126,13 @@ To use one synthetic full name throughout a package, declare the confirmed compo
 ]
 ```
 
-An optional `--candidates` JSONL file adds findings from a separate offline model. Each row has a one-based `page` and `candidates` arrays of zero-based line index, start, end, and role. Both paths use the same case-wide replacement map.
+An optional `--candidates` JSONL file adds findings from a separate offline model. Each row has a one-based `page` and `candidates` arrays of zero-based line index, start, end, and role. A model's unconfirmed person suggestion leaves the original wording intact and goes into the private review report. The final build requires review of those suggestions.
 
 The comparison reports counts and can save page and text offsets for private review. Check flagged pages, billing figures, handwriting, signatures, and identifiers present only in graphics before sharing a copy. Keep the OCR transcripts, case key, aliases, and review files with the source records.
 
 Replay confirmed position fixes with `--local-repairs` on both the build and comparison. Each entry records the one-based page, zero-based source line, character start and end, role, measured page box, and optional corrected reading. Use line index `-1` with a reading to add a field the first OCR engine missed. Treat this file as confidential because it can contain original readings.
+
+Use role `"keep"` and the exact source reading when review confirms a suggested name is clinical wording. Use a person role for a confirmed name at its source position. Rerun the build with the reviewed positions, a new output path, and no `--review-draft`.
 
 ### Correct a name in a reviewed PDF
 

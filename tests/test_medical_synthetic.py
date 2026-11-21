@@ -6,17 +6,18 @@ import shutil
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 
 from faker import Faker
 from PIL import Image, ImageChops
 import pymupdf
 import pytest
 
-from medical_anonymize import apply_edits, make_plan
+from medical_anonymize import apply_edits, make_plan, read_model_candidates
 from medical_dates import shift_dates
 from patient_names import patient_names
 from pdf_name_repair import NameReplacement, _join_hits, _name_edits, _proof_from_source, load_rules, repair
-from pdf_ocr import Line, Page, Word, read_pages
+from pdf_ocr import Line, Page, Word, read_pages, write_pages
 from pdf_review import compare, ocr_passes
 from pdf_synthetic import _scrub_search_aliases, _search_aliases, load_repairs, reconcile_dates, render, verify
 
@@ -72,6 +73,70 @@ def test_identity_variants_and_second_pass_share_one_role_scoped_mapping():
     assert person[7] == person[9] and person[7] != person[8]
     assert apply_edits(page.lines[4].text, plan[1, 4]).endswith(', MD')
     assert 'advised 3 weeks.' in apply_edits(page.lines[5].text, plan[1, 5])
+
+
+def test_unconfirmed_model_names_do_not_replace_or_teach_clinical_terms(tmp_path):
+    lines = text_page('Procedure: Median Nerve Glide', 'Median Nerve Glide was performed.',
+                      'Finding: Dynamic Stability', 'Provider: Dr. Casey Reed, MD',
+                      'Casey Reed signed the chart.')
+    exports = tmp_path / 'suggestions.jsonl'
+    exports.write_text(json.dumps({'page': 1, 'candidates': [[2, 9, len(lines.lines[2].text), 'person']]}))
+
+    def pipe(inputs, **kwargs):
+        for text, location in inputs:
+            entities = []
+            for value in ('Median Nerve Glide', 'Casey Reed'):
+                if text.startswith(('Procedure:', 'Casey Reed')) and value in text:
+                    start = text.index(value)
+                    entities.append(SimpleNamespace(text=value, start_char=start,
+                                                    end_char=start + len(value), label_='PERSON'))
+            yield SimpleNamespace(text=text, ents=entities), location
+
+    plan, _, receipt = plan_for([lines], nlp=SimpleNamespace(pipe=pipe), extras=read_model_candidates([exports]))
+    assert not any((1, line) in plan for line in range(3))
+    assert plan[1, 3][0].replacement == plan[1, 4][0].replacement
+    assert receipt['unconfirmed_person_suggestions'] == 2
+
+
+def test_reviewed_clinical_span_can_clear_a_private_draft_for_final_build(tmp_path, font_path):
+    source = tmp_path / 'sample.pdf'
+    value = 'Median Nerve Glide'
+    wording = f'Procedure: {value}'
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((30, 60), wording)
+        pdf.save(source)
+    page, = read_pages(source, None)
+    transcript = tmp_path / 'source.jsonl'
+    write_pages(transcript, [page])
+    start, end = wording.index(value), len(wording)
+    candidates = tmp_path / 'proposals.jsonl'
+    candidates.write_text(json.dumps({'page': 1, 'candidates': [[0, start, end, 'person']]}))
+    key = tmp_path / 'case.key'
+    root = Path(__file__).resolve().parents[1]
+    build = [sys.executable, str(root / 'pdf_synthetic.py'), str(source), '--transcript', str(transcript),
+             '--candidates', str(candidates), '--date-shift-days', '5', '--key-file', str(key), '--font', font_path]
+    final = tmp_path / 'final.pdf'
+    blocked = subprocess.run([*build, '--output', str(final)], capture_output=True, text=True, timeout=20)
+    assert blocked.returncode != 0 and not final.exists()
+    assert 'Unconfirmed person suggestions' in blocked.stderr
+
+    draft = tmp_path / 'draft.pdf'
+    subprocess.run([*build, '--review-draft', '--output', str(draft)], capture_output=True, check=True, timeout=20)
+    flags = tmp_path / 'review.json'
+    review = subprocess.run(
+        [sys.executable, str(root / 'pdf_review.py'), 'compare', '--transcript', str(transcript),
+         '--independent-source', str(transcript), '--independent-output', str(transcript),
+         '--candidates', str(candidates), '--date-shift-days', '5', '--key-file', str(key),
+         '--private-flags', str(flags)], capture_output=True, text=True, timeout=20,
+    )
+    assert review.returncode != 0 and json.loads(flags.read_text()) == [[1, 0, start, end, 'unconfirmed_person']]
+    keep = tmp_path / 'keep.json'
+    keep.write_text(json.dumps([[1, 0, start, end, 'keep', page.lines[0].box, value]]))
+    subprocess.run([*build, '--local-repairs', str(keep), '--output', str(final)],
+                   capture_output=True, check=True, timeout=20)
+    for path in (draft, final):
+        with pymupdf.open(path) as pdf:
+            assert pdf[0].get_text().strip() == wording
 
 
 def test_confirmed_patient_surname_uses_same_pseudonym_without_a_name_label():
