@@ -17,3 +17,4 @@ local-notes/
 output/
 outputs/
 ai-policy.local.json
+/private-case/

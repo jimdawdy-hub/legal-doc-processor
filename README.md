@@ -21,7 +21,7 @@ The document-processing pass runs locally. An **optional, vendor-agnostic AI red
 - A local provenance manifest, review report, and human-review audit.
 - Optional AI assessment, followed by a separately requested second redaction pass.
 
-**Only extracted text is processed. Original PDFs, office documents, images, attachments, embedded objects, and their metadata are not rewritten or certified safe.** Do not upload an original file on the assumption that this tool has redacted it. This is not a HIPAA Safe Harbor or GDPR anonymization certification.
+The JSONL workflow processes extracted text. The medical PDF workflow below creates a new PDF. Treat source files and intermediates as confidential. The processor does not certify HIPAA Safe Harbor or GDPR anonymization.
 
 ## Install
 
@@ -65,6 +65,86 @@ Only byte-identical files are deduplicated. Different documents with the same fi
 An unreadable/corrupt file is recorded in the local manifest while other files finish. The batch exits unsuccessfully if any processing errors occur; inspect its manifest before using any partial output. A nonempty output directory is refused to prevent appending duplicate records while overwriting the prior audit.
 
 ## Outputs and confidentiality
+
+### Extract positioned PDF text on a local GPU
+
+Use `pdf_ocr.py` to get text, line confidence, and word boxes for each PDF page. The command keeps selectable text on digital pages and runs OCR on scans, including scans with an existing hidden text layer.
+
+Prepare a Python environment with PyMuPDF, PaddleOCR 3.7, and ONNX Runtime GPU with matching CUDA libraries. Cache the PP-OCRv6 Medium models before opening private inputs. Run OCR with networking disabled. [Detector weights](https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_det_onnx) · [Recognizer weights](https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_rec_onnx)
+
+```sh
+umask 077
+mkdir -m 700 private-case
+CUDA_VISIBLE_DEVICES=0 python pdf_ocr.py /path/to/source.pdf \
+  --detector /path/to/detector --recognizer /path/to/recognizer \
+  --output private-case/positioned-text.jsonl
+```
+
+The transcript contains original text. To use two GPUs, run one process per GPU with `--shards 2`, distinct `--shard` values `0` and `1`, and distinct output files. Merge the two transcripts in page order with `jq -cs 'sort_by(.number)[]' private-case/shard-0.jsonl private-case/shard-1.jsonl > private-case/positioned-text.jsonl` before building the PDF.
+
+### Build a synthetic medical PDF
+
+Run the PDF workflow in an owner-only directory with networking disabled. It uses positioned OCR, the installed spaCy model, and format-specific rules. It replaces each recognized identity consistently across the package and shifts complete calendar dates by an explicitly chosen number of days. Partial or malformed dates count toward review. It rebuilds the pages from edited pixels and adds a searchable layer from the edited transcript, so source attachments, form objects, and hidden text stay out of the new PDF.
+
+Install Tesseract for the independent OCR check and `zxing-cpp` if using barcode masking. Use a local TrueType font with English and medical punctuation coverage. The code blocks use example paths and a sample date shift.
+
+```sh
+python pdf_review.py scan /path/to/source.pdf --output private-case/independent-source.jsonl
+python pdf_synthetic.py /path/to/source.pdf \
+  --transcript private-case/positioned-text.jsonl \
+  --independent-source private-case/independent-source.jsonl \
+  --date-shift-days 45 --ner-model en_core_web_lg --font /path/to/local-font.ttf \
+  --aliases private-case/entity-aliases.json \
+  --key-file private-case/case.key --barcodes --output private-case/synthetic.pdf
+python pdf_review.py scan private-case/synthetic.pdf \
+  --output private-case/independent-output.jsonl
+python pdf_review.py compare --transcript private-case/positioned-text.jsonl \
+  --independent-source private-case/independent-source.jsonl \
+  --independent-output private-case/independent-output.jsonl \
+  --date-shift-days 45 --ner-model en_core_web_lg --key-file private-case/case.key \
+  --aliases private-case/entity-aliases.json \
+  --private-flags private-case/visual-review.json
+```
+
+Record the confirmed patient name in the private `--aliases` file before building and reviewing the PDF. Each entry has a `role` and a `values` array of equivalent spellings, with the preferred full name first. For a compound patient surname, supply a `surname` field. A standalone surname uses the same synthetic surname as the full name. The independent visual check looks for the confirmed full names and surname, including occurrences the replacement pass missed. It fails if a confirmed name survives or if neither source OCR pass matched the confirmed patient aliases.
+
+To use one synthetic full name throughout a package, declare the confirmed components in `identity` and the desired full name in `replacement`. The parser matches full and partial names, initials, and suffixes in any order. It handles names split across nearby fields and letters split by OCR. Independent review flags original components and incomplete or mixed synthetic names.
+
+```json
+[
+  {
+    "role": "patient",
+    "identity": {
+      "given": "Avery",
+      "middle": ["Quinn"],
+      "surname": "Vale",
+      "suffix": "Jr."
+    },
+    "values": ["Vale Jr., Avery Q."],
+    "replacement": "Morgan Finch"
+  }
+]
+```
+
+An optional `--candidates` JSONL file adds findings from a separate offline model. Each row has a one-based `page` and `candidates` arrays of zero-based line index, start, end, and role. Both paths use the same case-wide replacement map.
+
+The comparison reports counts and can save page and text offsets for private review. Check flagged pages, billing figures, handwriting, signatures, and identifiers present only in graphics before sharing a copy. Keep the OCR transcripts, case key, aliases, and review files with the source records.
+
+Replay confirmed position fixes with `--local-repairs` on both the build and comparison. Each entry records the one-based page, zero-based source line, character start and end, role, measured page box, and optional corrected reading. Use line index `-1` with a reading to add a field the first OCR engine missed. Treat this file as confidential because it can contain original readings.
+
+### Correct a name in a reviewed PDF
+
+Use `pdf_name_repair.py` on a synthetic scan PDF produced by this workflow. Put the confirmed fixes in a private JSON file. For example, `[{"from": "Avery", "to": "Morgan"}]` changes the spelling wherever it occurs, including inside a longer word. The command matches uppercase, lowercase, and mixed-case readings and handles OCR gaps between letters.
+
+```sh
+python pdf_name_repair.py private-case/synthetic.pdf \
+  --replacements private-case/name-fixes.json --font /path/to/local-font.ttf \
+  --output private-case/corrected.pdf
+```
+
+The repair edits words on the page images and in the searchable text. It checks dates and amounts and reruns local OCR in three modes before publishing the new file. The receipt contains counts. To check for a word the OCR modes missed, supply `--reference` with the original PDF and one or more `--reference-transcript` files. The repair compares those source positions against the current page image before changing it.
+
+### Redacted dataset files
 
 ```text
 new-output/
