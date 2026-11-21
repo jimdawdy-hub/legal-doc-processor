@@ -136,6 +136,8 @@ Replay confirmed position fixes with `--local-repairs` on both the build and com
 
 Use `pdf_name_repair.py` on a synthetic scan PDF produced by this workflow. Put the confirmed fixes in a private JSON file. For example, `[{"from": "Avery", "to": "Morgan"}]` changes the spelling wherever it occurs, including inside a longer word. The command matches uppercase, lowercase, and mixed-case readings and handles OCR gaps between letters.
 
+Add `{"canonical": "Morgan Finch"}` to remove extra copies of the given name immediately before or after the full name. Include the canonical record with a first-name replacement so the repair can catch duplicates that the replacement would create. The repair keeps the full name and any generation suffix in place.
+
 ```sh
 python pdf_name_repair.py private-case/synthetic.pdf \
   --replacements private-case/name-fixes.json --font /path/to/local-font.ttf \

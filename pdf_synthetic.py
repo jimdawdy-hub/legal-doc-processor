@@ -371,8 +371,10 @@ def _search_name_edits(text, rules, patients):
                   for patient in patients
                   for span in patient.spans(text, include_synthetic=True, across_lines=True)
                   if not span.canonical]
-    candidates.extend((hit.start(), hit.end(), value(hit) if callable(value) else value)
-                      for pattern, value in rules for hit in pattern.finditer(text))
+    for pattern, value in rules:
+        group = 'extra' if 'extra' in pattern.groupindex else 0
+        candidates.extend((*hit.span(group), value(hit) if callable(value) else value)
+                          for hit in pattern.finditer(text))
     if not candidates:
         return []
     dates = calendar_spans(text)
@@ -500,8 +502,9 @@ def _erase_search_matches(page, rules, font, patients, *, resources=()):
                 pdf.xref_set_key(*key, original[1])
             elif value != original:
                 raise RuntimeError('A printed PDF resource conflicts with the searchable layer.')
-        _search_layer(page, ((Line(value, box, ()), value)
-                             for box, value in replacements.items()), font)
+        if any(replacements.values()):
+            _search_layer(page, ((Line(value, box, ()), value)
+                                 for box, value in replacements.items()), font)
     return len(replacements)
 
 

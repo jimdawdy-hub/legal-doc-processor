@@ -15,6 +15,7 @@ import pymupdf
 from medical_anonymize import BILLING, Edit, apply_edits, input_digest, read_transcript
 from medical_dates import shift_dates
 from patient_names import spaced_word
+from pdf_ocr import Line
 from pdf_review import ocr_passes
 from pdf_synthetic import (
     Mask, PagePainter, _check_amount_pixels, _checks_on_pages, _date_regions, _line_masks,
@@ -24,6 +25,7 @@ from pdf_synthetic import (
 
 SCAN_PROFILES = ((300, 3), (360, 11), (315, 6))
 NAME = re.compile(r"[^\W\d_]+(?:[ .’'-]+[^\W\d_]+)*\.?")
+SUFFIX = r'(?:jr|sr|junior|senior|ii|iii|iv)\.?'
 
 
 @dataclass(frozen=True)
@@ -44,18 +46,45 @@ class NameReplacement:
         return self.new
 
 
+def _duplicate_rules(canonical, replacements):
+    """Keep the full name and match only extra copies of its given name for removal."""
+    parts = canonical.split()
+    if re.fullmatch(SUFFIX, parts[-1], re.I):
+        parts.pop()
+    if len(parts) < 2:
+        raise ValueError('A canonical name needs a given name and surname.')
+    first, *surname = parts
+    alternatives = {first, *(item.old for item in replacements
+                             if item.new.casefold() == first.casefold())}
+    space = r'[ \t]+'
+    separator = r'(?:[ \t]*,[ \t]*|[ \t]+)'
+    given = '(?:' + '|'.join(space.join(map(spaced_word, value.split()))
+                             for value in sorted(alternatives, key=lambda item: (-len(item), item))) + r')(?!\w)'
+    family = space.join(map(spaced_word, surname)) + r'(?!\w)'
+    full = given + separator + family
+    return [
+        (re.compile(rf'(?<!\w)(?P<extra>(?:{given}{separator})+)(?={full})', re.I), ''),
+        (re.compile(rf'(?<!\w){full}(?:{space}{SUFFIX})?,?(?P<extra>(?:{space}{given}(?!{separator}{family}),?)+)',
+                    re.I), ''),
+    ]
+
+
 def load_rules(path):
     records = json.loads(path.read_text(encoding='utf-8'))
     if not isinstance(records, list) or not records:
         raise ValueError('Provide at least one private name replacement.')
     replacements = []
+    canonical = []
     seen = set()
     for row in records:
-        if not isinstance(row, dict) or set(row) != {'from', 'to'} or not all(
+        if not isinstance(row, dict) or set(row) not in ({'from', 'to'}, {'canonical'}) or not all(
             isinstance(value, str) and len(value) <= 120 and NAME.fullmatch(value)
             for value in row.values()
         ):
-            raise ValueError('Each replacement must have a valid from and to name.')
+            raise ValueError('Provide either from and to names or a canonical full name.')
+        if 'canonical' in row:
+            canonical.append(row['canonical'])
+            continue
         if row['from'].casefold() in seen:
             raise ValueError('Each source spelling must be unique.')
         seen.add(row['from'].casefold())
@@ -63,22 +92,98 @@ def load_rules(path):
     rules = [item.rule() for item in sorted(replacements, key=lambda item: -len(item.old))]
     if any(pattern.search(item.new) for pattern, _ in rules for item in replacements):
         raise ValueError('Replacement names must be free of the old spellings.')
-    return rules
+    return [rule for name in canonical for rule in _duplicate_rules(name, replacements)] + rules
 
 
 def _name_edits(text, rules):
     return [Edit(start, end, 'patient', new) for start, end, new in _search_name_edits(text, rules, ())]
 
 
+def _same_printed_row(left, right):
+    x0, y0, x1, y1 = left.box
+    a0, b0, _, b1 = right.box
+    height = max(y1 - y0, b1 - b0)
+    return (x0 < a0 and -2 <= a0 - x1 <= max(8, min(20, 1.8 * height))
+            and abs((y0 + y1) - (b0 + b1)) <= .9 * height)
+
+
+def _next_word(words, used, start):
+    left = words[start][0]
+    _, top, end, bottom = left.box
+    word = None
+    nearest_x = None
+    best = float('inf')
+    for i in range(start + 1, len(words)):
+        candidate = words[i][0]
+        x, y, _, base = candidate.box
+        if x > end + 20 or (nearest_x is not None and x > nearest_x + 2):
+            break
+        if i in used or not _same_printed_row(left, candidate):
+            continue
+        if nearest_x is None:
+            nearest_x = x
+        # Overlapping OCR readings can belong to different printed rows.
+        score = abs((top + bottom) - (y + base)) / 2 + abs((bottom - top) - (base - y))
+        if score < best:
+            best, word = score, i
+    return word
+
+
+def _matching_lines(page, rules):
+    if not any('extra' in pattern.groupindex for pattern, _ in rules):
+        yield from page.lines
+        return
+    # OCR lines can contain words from different printed rows. Group by word position.
+    yield from (line for line in page.lines if not line.words)
+    words = sorted(((word, line.confidence) for line in page.lines for word in line.words),
+                   key=lambda item: item[0].box[0])
+    used = set()
+    for i, item in enumerate(words):
+        if i in used:
+            continue
+        group = [item]
+        last = i
+        while (next_word := _next_word(words, used, last)) is not None:
+            group.append(words[next_word])
+            used.add(next_word)
+            last = next_word
+        positioned = tuple(word for word, _ in group)
+        bounds = pymupdf.Rect(positioned[0].box)
+        for word in positioned[1:]:
+            bounds |= pymupdf.Rect(word.box)
+        yield Line(' '.join(word.text for word in positioned), tuple(bounds), positioned,
+                   min(score if score is not None else .95 for _, score in group))
+
+
+def _keep_other_rows(mask, line, page):
+    box = pymupdf.Rect(mask.box)
+    midpoint = (box.y0 + box.y1) / 2
+    row = set(line.words)
+    for source in page.lines:
+        for word in source.words:
+            if word in row:
+                continue
+            other = pymupdf.Rect(word.box)
+            if (box & other).is_empty:
+                continue
+            if midpoint < other.y0 < box.y1 < other.y1:
+                box.y1 = other.y0
+            elif other.y0 < box.y0 < other.y1 < midpoint:
+                box.y0 = other.y1
+    return Mask(tuple(box), mask.replacement)
+
+
 def _hits(pages, rules):
     for page in pages:
-        for line in page.lines:
+        for line in _matching_lines(page, rules):
             edits = _name_edits(line.text, rules)
             if edits:
                 masks, fallback = _line_masks(line, edits)
                 if fallback:
                     raise RuntimeError('A name match has no reliable word position.')
                 for mask in masks:
+                    if not mask.replacement:
+                        mask = _keep_other_rows(mask, line, page)
                     yield mask, line.confidence if line.confidence is not None else .95
 
 
@@ -272,7 +377,7 @@ def repair(source, target, rules, *, font_path, workers, reference=None, referen
             pdf.save(stage.name, garbage=4, deflate=True, use_objstms=1)
         _verify(source, stage.name, scans, rules, changed)
         for checked in ocr_passes(stage.name, SCAN_PROFILES, workers):
-            if any(_name_edits(line.text, rules) for page in checked for line in page.lines):
+            if any(_name_edits(line.text, rules) for page in checked for line in _matching_lines(page, rules)):
                 raise RuntimeError('A name remains in the corrected page images.')
         if digest != input_digest(source) or (reference is not None and reference_digest != input_digest(reference)):
             raise RuntimeError('An input PDF changed during name repair.')
@@ -285,7 +390,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--replacements', required=True, type=Path, help='Private JSON list of from/to names')
+    parser.add_argument('--replacements', required=True, type=Path, help='Private JSON list of name fixes')
     parser.add_argument('--font', required=True, type=Path, help='Local TrueType font')
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--reference', type=Path, help='Optional original PDF for a pixel-level cross-check')

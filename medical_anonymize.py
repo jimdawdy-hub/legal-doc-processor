@@ -9,7 +9,7 @@ import re
 import unicodedata
 
 from medical_dates import calendar_spans, shift_dates
-from patient_names import patient_names, positioned_patient_spans
+from patient_names import canonical_patient_group, patient_names, positioned_patient_spans
 from pdf_ocr import Line, Page, Word
 
 
@@ -620,23 +620,30 @@ def find_aliases(text, rules):
 
 def _patient_name_candidates(page, identities, candidates):
     for name in identities:
-        for group in positioned_patient_spans(page.lines, name):
+        for group in positioned_patient_spans(page.lines, name, include_synthetic=True):
+            components = set().union(*(member.span.components for member in group))
+            source_parts = components & {'given', 'middle', 'surname', 'alias', 'suffix', 'initial'}
+            if not source_parts and not {'synthetic_given', 'synthetic_surname'} <= components:
+                continue
             if len(group) == 1:
                 member = group[0]
                 span = member.span
                 # A partial match inside a distinctly labeled clinician or family
                 # name still belongs to that person's full replacement.
-                if span.components <= {'given', 'middle', 'surname'} and any(
+                if span.components <= {'given', 'middle', 'surname', 'synthetic_given', 'synthetic_surname'} and any(
                     item.role in PEOPLE - {'patient', 'person'} and item.trust >= 85
                     and item.start <= span.start and span.end <= item.end
-                    and item.end - item.start > span.end - span.start
+                    and (not source_parts or item.end - item.start > span.end - span.start)
                     for item in candidates.get((page.number, member.line), ())
                 ):
                     continue
             target = max(group, key=lambda member: member.span.end - member.span.start)
+            already_canonical = canonical_patient_group(page.lines, group, name)
             for member in group:
                 span = member.span
+                value = page.lines[member.line].text[span.start:span.end]
                 yield member.line, Candidate(span.start, span.end, 'patient', 118,
+                                             value if already_canonical else
                                              name.replacement if member is target else '')
 
 
@@ -700,6 +707,8 @@ def make_plan(pages, *, days, key, faker, nlp=None, extras=(), spellings=(), dat
                 replacement = item.replacement
             else:
                 replacement = registry.display(original, item.role)
+            if item.role == 'patient' and item.replacement is not None and replacement == original:
+                continue
             edits.append(Edit(item.start, item.end, item.role, replacement))
             receipt[f'{item.role}_replacements'] += 1
         expected = apply_edits(text, edits)

@@ -15,7 +15,7 @@ import pytest
 from medical_anonymize import apply_edits, make_plan
 from medical_dates import shift_dates
 from patient_names import patient_names
-from pdf_name_repair import NameReplacement, _proof_from_source
+from pdf_name_repair import NameReplacement, _join_hits, _name_edits, _proof_from_source, load_rules, repair
 from pdf_ocr import Line, Page, Word, read_pages
 from pdf_review import compare, ocr_passes
 from pdf_synthetic import _scrub_search_aliases, _search_aliases, load_repairs, reconcile_dates, render, verify
@@ -242,6 +242,71 @@ def test_independent_check_catches_mixed_names_and_missing_parts():
     assert clean['known_patient_alias_matches'] == 0
 
 
+def test_review_and_generation_catch_repeated_synthetic_given_names():
+    aliases = [STRUCTURED_PATIENT]
+    original = text_page('Patient: Avery Quinn Vale Jr.')
+    repeated = text_page('Patient: Morgan Morgan Finch', 'Patient: Morgan Finch Morgan',
+                         'Separate entries: Morgan Finch Morgan Finch')
+    counts, flags = compare([original], [original], [repeated], {}, days=66, spellings=aliases)
+    assert counts['known_patient_alias_matches'] == 2
+    assert {flag[1] for flag in flags} == {0, 1}
+    plan, _, _ = plan_for([repeated], spellings=aliases)
+    assert [apply_edits(line.text, plan.get((1, i), [])) for i, line in enumerate(repeated.lines)] == [
+        'Patient: Morgan Finch', 'Patient: Morgan Finch', 'Separate entries: Morgan Finch Morgan Finch',
+    ]
+    clinicians = text_page('Provider: Dr. Casey Finch, MD', 'Provider: Dr. Morgan Finch, MD')
+    plan, _, _ = plan_for([clinicians], spellings=aliases)
+    assert [plan[1, i][0].role for i in range(2)] == ['physician', 'physician']
+
+
+def test_canonical_correction_erases_extras_and_preserves_separate_full_names(tmp_path):
+    config = tmp_path / 'name-fixes.json'
+    config.write_text(json.dumps([{'canonical': 'Morgan Finch'}, {'from': 'Avery', 'to': 'Morgan'}]))
+    rules = load_rules(config)
+    for before, after in [
+        ('MORGAN Morgan Finch', 'Morgan Finch'),
+        ('Morgan Finch Jr. MORGAN', 'Morgan Finch Jr.'),
+        ('Morgan Finch Morgan Jr.', 'Morgan Finch Jr.'),
+        ('Morgan Finch, Morgan', 'Morgan Finch,'),
+        ('Morgan Finch Morgan,', 'Morgan Finch'),
+        ('Morgan, Finch Morgan', 'Morgan, Finch'),
+        ('Morgan Finch Morgan Finch', 'Morgan Finch Morgan Finch'),
+        ('Morgan Finch. Morgan was seen', 'Morgan Finch. Morgan was seen'),
+        ('Patient: Avery Morgan Finch', 'Patient: Morgan Finch'),
+        ('Patient: Morgan Avery Finch', 'Patient: Morgan Finch'),
+        ('Patient: Morgan Finch Avery', 'Patient: Morgan Finch'),
+        ('Patient: Avery Finch Morgan', 'Patient: Morgan Finch'),
+    ]:
+        assert apply_edits(before, _name_edits(before, rules)) == after
+
+
+def test_canonical_correction_joins_only_words_on_the_same_printed_row(tmp_path):
+    config = tmp_path / 'name-fixes.json'
+    config.write_text(json.dumps([{'canonical': 'Morgan Finch'}]))
+    rules = load_rules(config)
+    name = Line('Morgan Finch', (20, 50, 90, 62),
+                (Word('Morgan', (20, 50, 55, 62)), Word('Finch', (60, 50, 90, 62))))
+    for extra_box, expected in [((95, 51, 135, 63), 1), ((95, 75, 135, 87), 0), ((160, 50, 200, 62), 0)]:
+        extra = Line('Morgan', extra_box, (Word('Morgan', extra_box),))
+        page = Page(1, 300, 400, 'ocr', (name, extra))
+        edits = _join_hits([page], rules)
+        assert len(edits) == expected
+        assert all(mask.replacement == '' for mask in edits)
+    left = Line('Label Morgan,', (10, 20, 55, 62),
+                (Word('Label', (10, 20, 35, 32)), Word('Morgan,', (20, 50, 55, 62))))
+    right = Line('Other Finch Morgan', (5, 50, 135, 90),
+                 (Word('Other', (5, 78, 30, 90)), Word('Finch', (60, 50, 90, 62)),
+                  Word('Morgan', (95, 51, 135, 63))))
+    page = Page(1, 300, 400, 'ocr', (left, right))
+    extra, = _join_hits([page], rules)
+    assert extra.box[0] > 90 and extra.replacement == ''
+    displaced_name = Line('Morgan,', (92, 46, 127, 56), (Word('Morgan,', (92, 46, 127, 56)),))
+    overlapping_word = Line('small', (91, 55, 117, 62), (Word('small', (91, 55, 117, 62)),))
+    page = Page(1, 300, 400, 'ocr', (name, overlapping_word, displaced_name))
+    extra, = _join_hits([page], rules)
+    assert extra.box[1] < 47 and extra.box[3] == 55 and not extra.replacement
+
+
 def test_searchable_mixed_patient_name_keeps_adjacent_billing_text(font_path):
     font = pymupdf.Font(fontfile=font_path)
     patients = patient_names([STRUCTURED_PATIENT])
@@ -391,3 +456,33 @@ def test_reviewed_pdf_name_repair_uses_local_ocr_and_keeps_pdf_layout(tmp_path, 
     original_result = output.read_bytes()
     duplicate = subprocess.run(command, capture_output=True, timeout=15)
     assert duplicate.returncode and output.read_bytes() == original_result
+
+
+def test_repair_removes_duplicate_names_from_ocr_when_search_text_is_clean(tmp_path, font_path):
+    if not shutil.which('tesseract'):
+        pytest.skip('The repair command requires local Tesseract.')
+    source, output = tmp_path / 'synthetic.pdf', tmp_path / 'corrected.pdf'
+    config = tmp_path / 'name-fixes.json'
+    config.write_text(json.dumps([{'canonical': 'Morgan Finch'}]))
+    with pymupdf.open() as scan, pymupdf.open() as pdf:
+        original = scan.new_page(width=360, height=240)
+        original.insert_text((30, 60), 'Patient: MORGAN Morgan Finch', fontsize=16)
+        original.insert_text((30, 92), 'Morgan Finch Morgan', fontsize=16)
+        original.insert_text((30, 146), 'Visit: 04/16/2022    Charge: $629.17', fontsize=14)
+        page = pdf.new_page(width=360, height=240)
+        page.insert_image(page.rect, pixmap=original.get_pixmap(dpi=180))
+        page.insert_text((30, 60), 'Patient: Morgan Finch', render_mode=3)
+        page.insert_text((30, 92), 'Morgan Finch', render_mode=3)
+        page.insert_text((30, 146), 'Visit: 04/16/2022    Charge: $629.17', render_mode=3)
+        pdf.save(source, deflate=True)
+    rules = load_rules(config)
+    receipt = repair(source, output, rules, font_path=font_path, workers=2)
+    assert receipt['visible_replacements'] == 2 and receipt['searchable_replacements'] == 0
+    with pymupdf.open(source) as before, pymupdf.open(output) as after:
+        page = after[0]
+        assert page.get_text() == before[0].get_text()
+        billing = pymupdf.Rect(0, 115, 360, 240)
+        assert page.get_pixmap(clip=billing).samples == before[0].get_pixmap(clip=billing).samples
+    visible, = ocr_passes(output, ((360, 11),), 1)
+    names = ' '.join(line.text for line in visible[0].lines).casefold()
+    assert names.count('morgan') == names.count('morgan finch') == 2

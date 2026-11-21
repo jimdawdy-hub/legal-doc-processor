@@ -104,6 +104,10 @@ class PatientName:
     def output_pattern(self):
         return self._pattern(include_synthetic=True)
 
+    @cached_property
+    def canonical_start(self):
+        return re.compile(r'[ \t]+'.join(map(re.escape, self.replacement.split())) + r'(?![^\W_])', re.I)
+
     def spans(self, text, *, include_synthetic=False, fragments=False, across_lines=False):
         """Read maximal patient-name runs, allowing any subset or order of confirmed parts."""
         pattern, kinds = self.output_pattern if include_synthetic else self.source_pattern
@@ -113,10 +117,12 @@ class PatientName:
             if kind == 'initial' and not (match[0][0].isupper() or match[0].endswith('.')):
                 continue
             gap = text[matches[-1][1]:match.start()] if matches else ''
+            line_break = '\n' in gap
             if across_lines and gap.count('\n') == 1:
                 gap = gap.replace('\n', ' ')
             next_complete_name = (matches and kind == 'synthetic_given'
-                                  and self.is_canonical(text[matches[-1][0]:matches[-1][1]]))
+                                  and self.is_canonical(text[matches[-1][0]:matches[-1][1]])
+                                  and (line_break or self.canonical_start.match(text, match.start())))
             if matches and _JOIN.fullmatch(gap) and not next_complete_name:
                 matches[-1][1] = match.end()
                 matches[-1][2].add(kind)
