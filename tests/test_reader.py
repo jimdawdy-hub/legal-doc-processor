@@ -1,7 +1,87 @@
-import pytest
-from pathlib import Path
+import shutil
+import subprocess
 from unittest.mock import patch, MagicMock
+
+import pymupdf
+import pytest
+
 from reader import read_file, ReadResult
+
+
+def _write_pdf(path, hidden=None):
+    visible = "Visible Example Record"
+    with pymupdf.open() as printed, pymupdf.open() as output:
+        page = printed.new_page(width=480, height=250)
+        for y in (45, 80, 115, 150, 185):
+            page.insert_text((24, y), visible, fontsize=23)
+        if hidden == "scan":
+            scan = output.new_page(width=480, height=250)
+            scan.insert_image(scan.rect, pixmap=page.get_pixmap(dpi=200))
+            page = scan
+        else:
+            output.insert_pdf(printed)
+            page = output[0]
+        if hidden:
+            if hidden == "opacity":
+                options = {"fill_opacity": 0}
+            elif hidden == "layer":
+                options = {"oc": output.add_ocg("Disabled text", on=0)}
+            else:
+                options = {"render_mode": 3}
+            for y in (30, 60, 90, 120, 160, 200, 220):
+                page.insert_text((24, y), "ZZSTALEOCR Placeholder Hidden Text", fontsize=12, **options)
+        output.save(path)
+
+
+@pytest.mark.parametrize("hidden", ["scan", "invisible", "opacity", "layer"])
+def test_read_pdf_ocr_excludes_hidden_text(tmp_path, hidden):
+    if not shutil.which("tesseract"):
+        pytest.skip("tesseract not installed")
+    path = tmp_path / "document.pdf"
+    _write_pdf(path, hidden=hidden)
+    original = path.read_bytes()
+
+    result = read_file(path)
+
+    assert result.ocr is True
+    assert result.ocr_confidence >= 70
+    assert "Visible Example Record" in result.text
+    assert "ZZSTALEOCR" not in result.text
+    assert path.read_bytes() == original
+
+
+def test_read_pdf_extracts_native_text(tmp_path):
+    path = tmp_path / "document.pdf"
+    _write_pdf(path)
+
+    result = read_file(path)
+
+    assert result.ocr is False
+    assert result.text.count("Visible Example Record") == 5
+
+
+@pytest.mark.parametrize("failure", ["missing_renderer", "missing_ocr", "low_confidence", "ocr_error", "empty"])
+def test_read_pdf_queues_instead_of_using_stale_layer(tmp_path, monkeypatch, failure):
+    import reader
+
+    path = tmp_path / "document.pdf"
+    _write_pdf(path, hidden="scan")
+
+    if failure == "missing_renderer":
+        monkeypatch.setattr(reader, "FITZ_AVAILABLE", False)
+    elif failure == "missing_ocr":
+        monkeypatch.setenv("PATH", str(tmp_path))
+    else:
+        monkeypatch.setattr(reader, "_sample_ocr_confidence",
+                            lambda doc: 60 if failure == "low_confidence" else 90)
+        if failure == "ocr_error":
+            def fail(*args):
+                raise subprocess.CalledProcessError(1, "tesseract")
+            monkeypatch.setattr(reader, "_ocr_page", fail)
+        else:
+            monkeypatch.setattr(reader, "_ocr_page", lambda *args: "")
+
+    assert read_file(path) is None
 
 def test_read_eml(tmp_dir):
     eml_content = (

@@ -242,6 +242,7 @@ def process_directory(
                 skipped=r.skipped,
                 skip_reason=r.skip_reason,
                 replacement=replacement,
+                pdf_text_checked=not r.skipped and r.path.suffix.lower() == '.pdf',
             )
         manifest.save()
         generate_reports(output_dir)

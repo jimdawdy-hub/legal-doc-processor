@@ -175,6 +175,24 @@ def _make_client(model, api_url, approved_ai_use, ai_policy=None):
                     os.environ.get('RE_ID_API_KEY'), policy=policy, approved_ai_use=approved_ai_use)
 
 
+def _require_checked_pdf_text(output_dir: Path, records) -> None:
+    if not records:
+        return
+
+    manifest_path = output_dir / 'provenance.json'
+    if not manifest_path.is_file():
+        raise ValueError('Missing pipeline provenance. Regenerate the batch with process.py before AI assessment')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    sources = {entry['source_id']: entry for entry in manifest['files']}
+    for source_id in {record['metadata']['source'] for record in records}:
+        source = sources.get(source_id)
+        if not source or not source.get('original_filename'):
+            raise ValueError('Analysis record is missing source provenance. Regenerate the batch with process.py')
+        if (Path(source['original_filename']).suffix.lower() == '.pdf'
+                and source.get('processing', {}).get('pdf_text_checked') is not True):
+            raise ValueError('Batch contains PDF text from before the hidden text check. Regenerate it with process.py')
+
+
 def run_assessment(output_dir: Path, max_samples: int = 0, quiet: bool = False,
                    model: str = DEFAULT_MODEL, *, api_url=None, approved_ai_use=False, ai_policy=None) -> dict:
     client = _make_client(model, api_url, approved_ai_use, ai_policy)
@@ -205,6 +223,7 @@ def run_assessment(output_dir: Path, max_samples: int = 0, quiet: bool = False,
     # Prioritise highest PII-flag records first
     records.sort(key=lambda r: r.get('metadata', {}).get('review_flags', 0), reverse=True)
     samples = records if not max_samples else records[:max_samples]
+    _require_checked_pdf_text(output_dir, samples)
 
     if not quiet:
         print("\nRe-identification Risk Assessment")
@@ -387,6 +406,7 @@ def retry_errors(output_dir: Path, quiet: bool = False,
                 src = record_id(r)
                 if src in failed_sources:
                     records_by_source[src] = r
+    _require_checked_pdf_text(output_dir, records_by_source.values())
 
     if not quiet:
         print(f"\nRetrying {len(failed_sources)} failed record(s) with max_tokens=8192...\n")

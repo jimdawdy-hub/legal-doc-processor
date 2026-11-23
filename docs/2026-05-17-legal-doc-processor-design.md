@@ -1,4 +1,4 @@
-> Historical design notes. Current behavior and privacy requirements are documented in the root README and code-review.md; embedded examples below are not current installation instructions.
+> Historical design notes. See the [README](../README.md) for current use and the [PDF intake reference](pdf-intake.md) for the current OCR and metadata behavior. The [code review](code-review.md) records the prior privacy changes.
 
 # Legal Document Processor — Design Spec
 **Date:** 2026-05-17  
