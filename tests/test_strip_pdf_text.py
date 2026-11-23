@@ -38,3 +38,24 @@ def test_input_untouched_and_same_path_refused(tmp_path):
         strip_text_layer(src, src)
     strip_text_layer(src, tmp_path / "out.pdf")
     assert src.read_bytes() == before
+
+
+def test_reocr_returns_only_visible_text(tmp_path):
+    pytest.importorskip("pytesseract")
+    import shutil
+    if not shutil.which("tesseract"):
+        pytest.skip("tesseract not installed")
+    page_doc = fitz.open()
+    p = page_doc.new_page(width=300, height=100)
+    p.insert_text((10, 50), "Visible Example", fontsize=24)
+    pix = p.get_pixmap(dpi=200)
+    src = fitz.open()
+    q = src.new_page(width=300, height=100)
+    q.insert_image(q.rect, pixmap=pix)
+    q.insert_text((10, 90), "HiddenZzyzx", fontsize=10, render_mode=3)
+    src.save(str(tmp_path / "in.pdf"))
+    r = strip_text_layer(tmp_path / "in.pdf", tmp_path / "out.pdf", reocr=True, dpi=200)
+    with fitz.open(str(tmp_path / "out.pdf")) as d:
+        text = d[0].get_text()
+    assert "Visible" in text and "Hidden" not in text
+    assert r["chars_removed"] > 0
