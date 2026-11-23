@@ -62,7 +62,7 @@ Classification (`caselaw`, `published`, `private`, `uncertain`) controls chunk s
 
 Only byte-identical files are deduplicated. Different documents with the same filename or different extensions are retained. Dataset IDs are stable opaque hashes of source paths, not Python's process-dependent `hash()`. These IDs are pseudonyms, not proof of anonymity.
 
-The pipeline renders PDFs with images, optional content layers, or invisible text locally, then runs optical character recognition (OCR) on the page pixels. The original embedded text is excluded from the dataset, even when it is long enough to look like usable text. OCR can still read handwriting and other information visible on the page. If local OCR is unavailable, fails, or does not produce usable text, the source is held in the private OCR queue.
+For PDFs with images, optional content layers, or invisible text, the pipeline runs optical character recognition (OCR) on locally rendered pages. Only the new OCR text enters the dataset. If OCR is unavailable, fails, or produces low-confidence or empty text, the pipeline holds the source in the private OCR queue. See the [PDF intake and metadata reference](docs/pdf-intake.md).
 
 An unreadable/corrupt file is recorded in the local manifest while other files finish. The batch exits unsuccessfully if any processing errors occur; inspect its manifest before using any partial output. A nonempty output directory is refused to prevent appending duplicate records while overwriting the prior audit.
 
@@ -86,7 +86,7 @@ new-output/
 
 Only individually reviewed files in `rag/` or `finetune/` are candidates for a separately authorized transfer, and the external-AI requirements above still apply. The historical `finetune` directory name is retained for compatibility: it contains text chunks for review/analysis, not permission to train a model on client information.
 
-Each JSONL record has `text` and `metadata`, including an opaque source ID, document type, chunk position, and token count. `pii_stripped: true` means detection/replacement ran; it does **not** mean all identifying information was removed. Private records are split into approximately 2,048-token chunks; public-source classes use approximately 512-token chunks. Model tokenization and boundary behavior still need validation for the intended downstream system.
+Each JSONL record has `text` and `metadata`, including an opaque source ID, document type, chunk position, and token count. The private `provenance.json` manifest retains the original filename, full path, and file hash. `pii_stripped: true` means detection/replacement ran; it does **not** mean all identifying information was removed. Private records are split into approximately 2,048-token chunks; public-source classes use approximately 512-token chunks. Model tokenization and boundary behavior still need validation for the intended downstream system.
 
 ## Optional AI red-team assessment
 
@@ -148,14 +148,14 @@ python second_pass.py --output /path/to/new-output --blocklist /private/path/ter
 
 ## Scrubbing the hidden text layer of a scanned PDF
 
-To distribute a PDF copy after editing its page images, finalize it locally. The standalone utility strips the old text layer from the copy, including names or numbers that may survive image edits.
+Use `strip_pdf_text.py` to finalize a separate scanned PDF copy after you apply any visible redactions to the page images. The utility removes all PDF text objects and annotations. An annotation that only covers content on screen can disappear during this step.
 
 ```bash
 python strip_pdf_text.py cleaned.pdf cleaned-notext.pdf            # images only, no text layer
 python strip_pdf_text.py cleaned.pdf cleaned-ocr.pdf --reocr       # re-OCR the cleaned images
 ```
 
-It removes page text, annotations, embedded files, and the standard PDF document metadata and XMP packet from the output copy. It preserves the page images. The image-only mode verifies that no page text survives. `--reocr` rebuilds a searchable layer from what is visible in the images, so use it only after the images themselves are anonymized. The input is never modified.
+The utility preserves the page images and clears the output copy's standard document metadata, XMP metadata packet, and embedded files. Without `--reocr`, it verifies that no searchable page text remains. With `--reocr`, anything still visible in the images, including handwriting, can become searchable. The original PDF stays unchanged. See the [PDF intake and metadata reference](docs/pdf-intake.md#finalizing-a-pdf-copy).
 
 ## Human review
 

@@ -11,7 +11,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `strip_pdf_text.py`: removes the hidden OCR text layer (plus annotations, embedded files, metadata) from a scanned PDF, with optional local re-OCR of the page images.
+- `strip_pdf_text.py` removes page text, annotations, embedded files, and standard document and XMP metadata from a scanned PDF copy. Use `--reocr` to rebuild searchable text from the page images.
+
+### Changed
+
+- PDF intake now rebuilds text locally from rendered pages when a PDF contains images, invisible text, or optional content layers. OCR failures, low confidence, and empty results go to the private OCR queue.
+- AI assessment and retries check local provenance before sending PDF-derived text. Regenerate older PDF batches with `process.py` before assessment.
+
+### Removed
+
+- OCRmyPDF dependency. Local PDF intake now uses Tesseract directly.
 
 ## [0.3.0] — 2026-11-10
 
