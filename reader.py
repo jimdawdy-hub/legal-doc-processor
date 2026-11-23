@@ -1,6 +1,6 @@
+import csv
 import email as email_lib
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -14,13 +14,6 @@ try:
     FITZ_AVAILABLE = True
 except ImportError:
     FITZ_AVAILABLE = False
-
-try:
-    import pytesseract
-    from PIL import Image
-    TESSERACT_AVAILABLE = True
-except ImportError:
-    TESSERACT_AVAILABLE = False
 
 import extract_msg as extract_msg_lib
 
@@ -38,8 +31,8 @@ class ReadResult:
 
 def read_file(path: Path) -> Optional['ReadResult']:
     """
-    Returns ReadResult, or None if the file is a scanned PDF with OCR
-    confidence below threshold (caller should move to ocr_queue).
+    Returns ReadResult, or None if a PDF cannot be safely read
+    (caller should move it to the local ocr_queue).
     """
     ext = path.suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
@@ -148,55 +141,67 @@ def _read_msg(path: Path, size: int) -> ReadResult:
 
 
 def _read_pdf(path: Path, size: int) -> Optional[ReadResult]:
-    text = pdfminer_extract(str(path)) or ''
-    if len(text.strip()) >= 100:
-        return ReadResult(
-            text=text, filename=path.name,
-            extension='.pdf', size_bytes=size, ocr=False,
-        )
-    return _ocr_pdf(path, size)
+    if not FITZ_AVAILABLE:
+        return None
+
+    with fitz.open(str(path)) as doc:
+        # A scanned PDF's embedded text may predate changes to its visible pages.
+        if doc.get_ocgs() or any(
+            any(kind in ('fill-image', 'ignore-text') for kind, _ in page.get_bboxlog())
+            or any(span['opacity'] == 0 for span in page.get_texttrace())
+            for page in doc
+        ):
+            return _ocr_pdf(doc, path, size)
+
+        text = pdfminer_extract(str(path)) or ''
+        if len(text.strip()) >= 100:
+            return ReadResult(
+                text=text, filename=path.name,
+                extension='.pdf', size_bytes=size, ocr=False,
+            )
+        return _ocr_pdf(doc, path, size)
 
 
-def _ocr_pdf(path: Path, size: int) -> Optional[ReadResult]:
-    """Returns None if OCR confidence is below 70% threshold."""
-    confidence = _sample_ocr_confidence(path)
-    if confidence is None or confidence < 70.0:
-        return None  # caller moves to ocr_queue
-
-    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+def _ocr_pdf(doc, path: Path, size: int) -> Optional[ReadResult]:
     try:
-        subprocess.run(
-            ['ocrmypdf', '--output-type', 'pdf', '--redo-ocr',
-             str(path), str(tmp_path)],
-            check=True, capture_output=True,
+        confidence = _sample_ocr_confidence(doc)
+        if confidence is None or confidence < 70.0:
+            return None
+        text = '\n\n'.join(
+            _ocr_page(page, 300).strip()
+            for page in doc
         )
-        text = pdfminer_extract(str(tmp_path)) or ''
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
+        return None
+    if not text.strip():
+        return None
     return ReadResult(
         text=text, filename=path.name, extension='.pdf',
         size_bytes=size, ocr=True, ocr_confidence=confidence,
     )
 
 
-def _sample_ocr_confidence(path: Path) -> Optional[float]:
-    """Sample first 3 pages with pytesseract; return mean word confidence or None."""
-    if not (FITZ_AVAILABLE and TESSERACT_AVAILABLE):
-        return None
+def _ocr_page(page, dpi: int, *config: str) -> str:
+    # Render visible annotations too so a displayed redaction still covers the page.
+    pix = page.get_pixmap(dpi=dpi, annots=True)
+    output = subprocess.run(
+        ['tesseract', 'stdin', 'stdout', '--dpi', str(dpi), *config],
+        input=pix.tobytes('png'), capture_output=True, check=True,
+    )
+    return output.stdout.decode('utf-8')
 
+
+def _sample_ocr_confidence(doc) -> Optional[float]:
+    """Return mean word confidence for the first three rendered pages."""
     confidences = []
-    with fitz.open(str(path)) as doc:
-        for page_num in range(min(3, len(doc))):
-            pix = doc[page_num].get_pixmap(dpi=200)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-            for value in data['conf']:
-                try:
-                    value = float(value)
-                except (ValueError, TypeError):
-                    continue
-                if 0 < value <= 100:
-                    confidences.append(value)
+    for page_num in range(min(3, len(doc))):
+        data = _ocr_page(doc[page_num], 200, 'tsv')
+        rows = csv.DictReader(data.splitlines(), delimiter='\t', quoting=csv.QUOTE_NONE)
+        for row in rows:
+            try:
+                value = float(row.get('conf'))
+            except (ValueError, TypeError):
+                continue
+            if 0 < value <= 100:
+                confidences.append(value)
     return sum(confidences) / len(confidences) if confidences else None

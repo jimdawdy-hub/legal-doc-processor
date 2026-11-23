@@ -15,7 +15,7 @@ The document-processing pass runs locally. An **optional, vendor-agnostic AI red
 ## What it processes
 
 - PDF, DOCX, PPTX, EML, MSG, and UTF-8 text.
-- Local text extraction and OCR for scanned PDFs. Low or unavailable OCR confidence holds the file for local review.
+- Local text extraction and OCR for scanned PDFs. The pipeline rebuilds text from rendered pages when a PDF has rendered images or an invisible text layer. Low confidence or unavailable OCR holds the file for local review.
 - PII detection using Microsoft Presidio, a local spaCy model, and supplemental labeled medical/case identifiers.
 - Typed redaction markers by default; optional synthetic replacements for authorized testing or dataset preparation.
 - A local provenance manifest, review report, and human-review audit.
@@ -36,7 +36,7 @@ python -m pip install -r requirements.txt
 python -m spacy download en_core_web_lg
 ```
 
-Install Tesseract and OCRmyPDF system dependencies for scanned PDFs. Install the spaCy model before processing: the tool refuses to download an NLP model implicitly during a run. Tokenizer assets may require an initial download/cache population. No paid AI calls are needed for local processing or tests.
+Install Tesseract for scanned PDFs. Install the spaCy model before processing: the tool refuses to download an NLP model implicitly during a run. Tokenizer assets may require an initial download/cache population. No paid AI calls are needed for local processing or tests.
 
 ## Local processing
 
@@ -61,6 +61,8 @@ Classification (`caselaw`, `published`, `private`, `uncertain`) controls chunk s
 `--preserve-public-text` explicitly bypasses redaction for documents classified as `caselaw` or `published`. Use it only in a separately verified public-source batch; classification can be wrong. Keep it off for client files, medical records, mixed collections, and other confidential material.
 
 Only byte-identical files are deduplicated. Different documents with the same filename or different extensions are retained. Dataset IDs are stable opaque hashes of source paths, not Python's process-dependent `hash()`. These IDs are pseudonyms, not proof of anonymity.
+
+The pipeline renders PDFs with images, optional content layers, or invisible text locally, then runs optical character recognition (OCR) on the page pixels. The original embedded text is excluded from the dataset, even when it is long enough to look like usable text. OCR can still read handwriting and other information visible on the page. If local OCR is unavailable, fails, or does not produce usable text, the source is held in the private OCR queue.
 
 An unreadable/corrupt file is recorded in the local manifest while other files finish. The batch exits unsuccessfully if any processing errors occur; inspect its manifest before using any partial output. A nonempty output directory is refused to prevent appending duplicate records while overwriting the prior audit.
 
@@ -128,6 +130,8 @@ python re_id_risk.py --output /path/to/new-output \
 
 `RE_ID_API_URL`, `RE_ID_MODEL`, and `RE_ID_POLICY` are equivalent configuration variables. `--confirm-approved-ai-use` is required in addition to the policy file; it acknowledges the disclosure and the Business/Enterprise, no-training, and applicable retention requirements.
 
+AI assessment and retries require the local provenance manifest. Before sending a PDF-derived record, the assessor checks that it passed the current PDF intake. Regenerate older PDF batches into a new output directory with `process.py` before assessing them.
+
 All analysis records are assessed by default. `--samples N` explicitly limits the sample and cannot clear unassessed records. Legacy oversized records are sampled at the beginning, middle, and end (up to roughly 24,000 characters); truncated assessments are marked incomplete. The model is asked for residual identifiers, reconstruction risks, recommended redactions, and a risk level. Its response is schema-checked, not accepted as proof of anonymity.
 
 Failed/malformed results and partial assessments produce `UNKNOWN` overall risk rather than a misleading `LOW`. Retry failures using the same configuration plus `--retry-errors`. Retry identities include the chunk index, so chunks of the same document are not confused. A changed dataset requires a fresh assessment.
@@ -144,14 +148,14 @@ python second_pass.py --output /path/to/new-output --blocklist /private/path/ter
 
 ## Scrubbing the hidden text layer of a scanned PDF
 
-If you anonymize a scanned PDF by editing its page images, the OCR text behind the images still holds the original names and numbers. Remove it locally (no network, no AI call):
+To distribute a PDF copy after editing its page images, finalize it locally. The standalone utility strips the old text layer from the copy, including names or numbers that may survive image edits.
 
 ```bash
 python strip_pdf_text.py cleaned.pdf cleaned-notext.pdf            # images only, no text layer
 python strip_pdf_text.py cleaned.pdf cleaned-ocr.pdf --reocr       # re-OCR the cleaned images
 ```
 
-It deletes all page text, annotations, embedded files, and metadata, keeps the page images, and fails if any text survives. `--reocr` rebuilds a searchable layer from what is visible in the images, so use it only after the images themselves are anonymized. The input is never modified.
+It removes page text, annotations, embedded files, and the standard PDF document metadata and XMP packet from the output copy. It preserves the page images. The image-only mode verifies that no page text survives. `--reocr` rebuilds a searchable layer from what is visible in the images, so use it only after the images themselves are anonymized. The input is never modified.
 
 ## Human review
 

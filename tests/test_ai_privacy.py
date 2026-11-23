@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 
 import pytest
 from ai_client import AIClient
-from re_id_risk import _assess_record, _summarize, retry_errors
+from re_id_risk import _assess_record, _summarize, retry_errors, run_assessment
 from utils import sha256_file
 
 
@@ -100,6 +100,9 @@ def test_retry_keeps_distinct_chunks_of_the_same_document(tmp_path):
     report = {'total_records_in_dataset': 2, 'dataset_sha256': sha256_file(dataset),
               'assessments': [{'_source': 'anon_test', '_record_id': f'anon_test:{i}', 'risk_level': 'ERROR'} for i in range(2)]}
     (tmp_path / 're_id_risk_report.json').write_text(json.dumps(report))
+    (tmp_path / 'provenance.json').write_text(json.dumps({
+        'files': [{'source_id': 'anon_test', 'original_filename': 'fixture.txt'}],
+    }))
     def assess(client, record, model):
         return {'_source': 'anon_test', '_record_id': f"anon_test:{record['metadata']['chunk_index']}", 'risk_level': 'LOW'}
     with patch('re_id_risk._make_client'), patch('re_id_risk._assess_record', side_effect=assess) as call:
@@ -107,6 +110,34 @@ def test_retry_keeps_distinct_chunks_of_the_same_document(tmp_path):
         assert call.call_count == 2
     assert [a['_record_id'] for a in result['assessments']] == ['anon_test:0', 'anon_test:1']
     assert result['assessment_complete']
+
+
+@pytest.mark.parametrize('assess', [run_assessment, retry_errors])
+@pytest.mark.parametrize('checked', [None, False, True])
+def test_pdf_assessment_requires_checked_source(tmp_path, assess, checked):
+    dataset = tmp_path / 'finetune' / 'dataset.jsonl'
+    dataset.parent.mkdir()
+    source = 'anon_pdf'
+    dataset.write_text(json.dumps({'text': 'Synthetic example.', 'metadata': {'source': source}}) + '\n')
+    report = {'total_records_in_dataset': 1, 'dataset_sha256': sha256_file(dataset),
+              'assessments': [{'_source': source, 'risk_level': 'ERROR'}]}
+    (tmp_path / 're_id_risk_report.json').write_text(json.dumps(report))
+    if checked is not None:
+        processing = {'pdf_text_checked': True} if checked else {}
+        (tmp_path / 'provenance.json').write_text(json.dumps({
+            'files': [{'source_id': source, 'original_filename': 'fixture.PDF',
+                       'processing': processing}],
+        }))
+
+    with patch('re_id_risk._make_client'), patch('re_id_risk._assess_record') as send:
+        if checked:
+            send.return_value = {'_source': source, 'risk_level': 'LOW'}
+            assert assess(tmp_path, quiet=True)['assessment_complete']
+            send.assert_called_once()
+        else:
+            with pytest.raises(ValueError, match='provenance|hidden text check'):
+                assess(tmp_path, quiet=True)
+            send.assert_not_called()
 
 
 def test_redirect_cannot_forward_document_text_or_credentials():

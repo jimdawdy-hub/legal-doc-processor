@@ -60,6 +60,7 @@ class ProvenanceManifest:
         skipped: bool = False,
         skip_reason: Optional[str] = None,
         replacement: str = 'tokens',
+        pdf_text_checked: bool = False,
     ) -> None:
         sidecar_info = self.sidecar.get(original_path.name, {})
         try:
@@ -90,6 +91,8 @@ class ProvenanceManifest:
                 'token_count': token_count,
             },
         })
+        if pdf_text_checked:
+            self._files[-1]['processing']['pdf_text_checked'] = True
 
     def save(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
