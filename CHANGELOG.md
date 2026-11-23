@@ -7,6 +7,12 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `strip_pdf_text.py`: removes the hidden OCR text layer (plus annotations, embedded files, metadata) from a scanned PDF, with optional local re-OCR of the page images.
+
 ## [0.3.0] — 2026-11-10
 
 The previous published release was v0.2.0. The pre-existing v0.4.0 development tag is retained unchanged; v0.3.0 is the new published release.

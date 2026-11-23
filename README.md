@@ -142,6 +142,17 @@ python second_pass.py --output /path/to/new-output --blocklist /private/path/ter
 
 `--apply` on the assessment command requests automatic second-pass redaction after successful responses. Assessment errors block application. A partial sample is still a partial assessment, even if its known findings are applied. Applying changes makes the prior assessment stale; reassess the new text before relying on its risk result. Regex matches use literal strings, not model-supplied executable patterns.
 
+## Scrubbing the hidden text layer of a scanned PDF
+
+If you anonymize a scanned PDF by editing its page images, the OCR text behind the images still holds the original names and numbers. Remove it locally (no network, no AI call):
+
+```bash
+python strip_pdf_text.py cleaned.pdf cleaned-notext.pdf            # images only, no text layer
+python strip_pdf_text.py cleaned.pdf cleaned-ocr.pdf --reocr       # re-OCR the cleaned images
+```
+
+It deletes all page text, annotations, embedded files, and metadata, keeps the page images, and fails if any text survives. `--reocr` rebuilds a searchable layer from what is visible in the images, so use it only after the images themselves are anonymized. The input is never modified.
+
 ## Human review
 
 ```bash
